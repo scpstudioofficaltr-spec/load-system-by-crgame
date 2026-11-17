@@ -1,4 +1,6 @@
 import tkinter as tk
+import threading
+import urllib.request
 
 WHITE = "#ffffff"
 RED = "#e10600"
@@ -7,6 +9,41 @@ GREY = "#666666"
 LIGHT = "#f6f6f6"
 LINE = "#e5e5e5"
 
+LIST_URL = ("https://raw.githubusercontent.com/scpstudioofficaltr-spec/"
+            "load-system-by-crgame/refs/heads/main/game/list")
+
+# Liste alınamazsa ya da boşsa gösterilecek örnek oyun
+FALLBACK = [{"name": "Örnek Oyun",
+             "file": "ornek_oyun.py",
+             "desc": "Bu bir örnek oyundur. Gerçek oyunlar GitHub listesinden gelecek."}]
+
+
+def fetch_games():
+    """GitHub'daki list dosyasından oyunları çeker.
+    Satır formatı:  isim   veya   isim | açıklama"""
+    try:
+        req = urllib.request.Request(LIST_URL, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            text = r.read().decode("utf-8", errors="ignore")
+    except Exception:
+        return FALLBACK
+
+    games = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "|" in line:
+            name, desc = [p.strip() for p in line.split("|", 1)]
+        else:
+            name, desc = line, "Bu oyun için henüz açıklama eklenmedi."
+        if name.lower().endswith(".py"):
+            name = name[:-3]
+        games.append({"name": name,
+                      "file": name.replace(" ", "_").lower() + ".py",
+                      "desc": desc})
+    return games or FALLBACK
+
 
 def build(root):
     root.title("LOAD SYSTEM")
@@ -14,19 +51,20 @@ def build(root):
     for w in root.winfo_children():
         w.destroy()
 
-    # Üst menü
+    state = {"anim": None, "games": None}
+
+    # ---------- Üst menü ----------
     nav = tk.Frame(root, bg=WHITE, highlightbackground=LINE, highlightthickness=1)
     nav.pack(fill="x", side="top")
     tk.Label(nav, text="LOAD SYSTEM", fg=RED, bg=WHITE,
              font=("Segoe UI", 16, "bold")).pack(side="left", padx=24, pady=14)
-    for item in ("İletişim", "Hakkında", "Ana Sayfa"):
-        tk.Label(nav, text=item, fg=DARK, bg=WHITE, font=("Segoe UI", 11),
-                 cursor="hand2").pack(side="right", padx=16)
+    home_btn = tk.Label(nav, text="Ana Menü", fg=DARK, bg=WHITE,
+                        font=("Segoe UI", 11), cursor="hand2")
+    home_btn.pack(side="right", padx=16)
 
-    # Kaydırılabilir gövde
+    # ---------- Kaydırılabilir gövde ----------
     body = tk.Frame(root, bg=WHITE)
     body.pack(fill="both", expand=True)
-
     canvas = tk.Canvas(body, bg=WHITE, highlightthickness=0)
     sb = tk.Scrollbar(body, orient="vertical", command=canvas.yview)
     sb.pack(side="right", fill="y")
@@ -37,53 +75,115 @@ def build(root):
     win = canvas.create_window((0, 0), window=page, anchor="nw")
     page.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
     canvas.bind("<Configure>", lambda e: canvas.itemconfigure(win, width=e.width))
-    canvas.bind_all("<MouseWheel>", lambda e: canvas.yview_scroll(int(-e.delta / 120), "units"))
+    canvas.bind_all("<MouseWheel>",
+                    lambda e: canvas.yview_scroll(int(-e.delta / 120), "units"))
 
-    # Hero bölümü
-    hero = tk.Frame(page, bg=WHITE)
-    hero.pack(fill="x", padx=60, pady=(70, 40))
-    tk.Label(hero, text="Hoş geldin", fg=RED, bg=WHITE,
-             font=("Segoe UI", 12, "bold")).pack(anchor="w")
-    tk.Label(hero, text="Sistemin tek ekranda", fg=DARK, bg=WHITE,
-             font=("Segoe UI", 38, "bold")).pack(anchor="w", pady=(6, 0))
-    tk.Label(hero, text="Tüm araçlar, bağlantılar ve bilgiler tek bir pencerede.",
-             fg=GREY, bg=WHITE, font=("Segoe UI", 13)).pack(anchor="w", pady=(10, 24))
-    tk.Button(hero, text="Başla", fg=WHITE, bg=RED, activebackground="#b80500",
-              activeforeground=WHITE, relief="flat", font=("Segoe UI", 12, "bold"),
-              padx=28, pady=10, cursor="hand2").pack(anchor="w")
+    def clear():
+        if state["anim"]:
+            root.after_cancel(state["anim"])
+            state["anim"] = None
+        for w in page.winfo_children():
+            w.destroy()
+        canvas.yview_moveto(0)
 
-    # Kartlar
-    cards = tk.Frame(page, bg=WHITE)
-    cards.pack(fill="x", padx=60, pady=20)
-    items = [
-        ("Hızlı Erişim", "Sık kullanılan işlemlere tek tıkla ulaş."),
-        ("Güvenli Yapı", "Verilerin yerel olarak işlenir ve korunur."),
-        ("Sade Tasarım", "Dağınıklık yok, yalnızca ihtiyacın olanlar."),
-    ]
-    for i, (title, text) in enumerate(items):
-        card = tk.Frame(cards, bg=LIGHT, highlightbackground=LINE, highlightthickness=1)
-        card.grid(row=0, column=i, padx=10, sticky="nsew")
-        cards.grid_columnconfigure(i, weight=1)
-        tk.Frame(card, bg=RED, height=4).pack(fill="x")
-        tk.Label(card, text=title, fg=DARK, bg=LIGHT,
-                 font=("Segoe UI", 15, "bold")).pack(anchor="w", padx=20, pady=(20, 6))
-        tk.Label(card, text=text, fg=GREY, bg=LIGHT, font=("Segoe UI", 11),
-                 wraplength=260, justify="left").pack(anchor="w", padx=20, pady=(0, 24))
+    # ---------- ANA MENÜ ----------
+    def show_home():
+        clear()
+        hero = tk.Frame(page, bg=WHITE)
+        hero.pack(fill="x", padx=60, pady=(50, 20))
+        tk.Label(hero, text="Hoş geldin", fg=RED, bg=WHITE,
+                 font=("Segoe UI", 12, "bold")).pack(anchor="w")
+        tk.Label(hero, text="Oyunlar", fg=DARK, bg=WHITE,
+                 font=("Segoe UI", 38, "bold")).pack(anchor="w", pady=(6, 0))
+        tk.Label(hero, text="Bir oyun seç ve başla.", fg=GREY, bg=WHITE,
+                 font=("Segoe UI", 13)).pack(anchor="w", pady=(10, 0))
 
-    # İçerik bölümü
-    section = tk.Frame(page, bg=WHITE)
-    section.pack(fill="x", padx=60, pady=(50, 20))
-    tk.Label(section, text="Hakkında", fg=DARK, bg=WHITE,
-             font=("Segoe UI", 22, "bold")).pack(anchor="w")
-    tk.Label(section,
-             text=("Bu ekran, uygulamanın ana arayüzüdür. Pencere büyütülmüş olarak açılır "
-                   "ve içerik, sayfa gibi aşağı doğru kaydırılabilir. Arayüzü değiştirmek "
-                   "için bu dosyadaki build fonksiyonunu düzenlemen yeterlidir."),
-             fg=GREY, bg=WHITE, font=("Segoe UI", 12), wraplength=900,
-             justify="left").pack(anchor="w", pady=(10, 0))
+        grid = tk.Frame(page, bg=WHITE)
+        grid.pack(fill="x", padx=50, pady=20)
+        status = tk.Label(page, text="Oyunlar yükleniyor...", fg=GREY, bg=WHITE,
+                          font=("Segoe UI", 12))
+        status.pack(pady=10)
 
-    # Alt bilgi
-    footer = tk.Frame(page, bg=LIGHT, highlightbackground=LINE, highlightthickness=1)
-    footer.pack(fill="x", side="bottom", pady=(60, 0))
+        def fill(games):
+            if not grid.winfo_exists():
+                return
+            status.destroy()
+            state["games"] = games
+            cols = 3
+            for i, g in enumerate(games):
+                card = tk.Frame(grid, bg=LIGHT, highlightbackground=LINE,
+                                highlightthickness=1, cursor="hand2")
+                card.grid(row=i // cols, column=i % cols, padx=10, pady=10, sticky="nsew")
+                grid.grid_columnconfigure(i % cols, weight=1, uniform="c")
+                tk.Frame(card, bg=RED, height=4).pack(fill="x")
+                t = tk.Label(card, text=g["name"], fg=DARK, bg=LIGHT,
+                             font=("Segoe UI", 15, "bold"), cursor="hand2")
+                t.pack(anchor="w", padx=20, pady=(20, 6))
+                f = tk.Label(card, text=g["file"], fg=GREY, bg=LIGHT,
+                             font=("Consolas", 10), cursor="hand2")
+                f.pack(anchor="w", padx=20, pady=(0, 24))
+                for w in (card, t, f):
+                    w.bind("<Button-1>", lambda e, g=g: show_loading(g))
+
+        def worker():
+            games = fetch_games()
+            root.after(0, lambda: fill(games))
+
+        if state["games"] is not None:
+            fill(state["games"])
+        else:
+            threading.Thread(target=worker, daemon=True).start()
+
+    # ---------- YÜKLEME ANİMASYONU ----------
+    def show_loading(game):
+        clear()
+        box = tk.Frame(page, bg=WHITE)
+        box.pack(pady=(140, 0))
+        c = tk.Canvas(box, width=90, height=90, bg=WHITE, highlightthickness=0)
+        c.pack()
+        tk.Label(box, text=f"{game['name']} yükleniyor...", fg=DARK, bg=WHITE,
+                 font=("Segoe UI", 14)).pack(pady=(20, 0))
+
+        c.create_oval(10, 10, 80, 80, outline=LINE, width=6)
+        arc = c.create_arc(10, 10, 80, 80, start=0, extent=100,
+                           style="arc", outline=RED, width=6)
+        ticks = {"n": 0}
+
+        def spin():
+            ticks["n"] += 1
+            c.itemconfigure(arc, start=(ticks["n"] * 12) % 360)
+            if ticks["n"] >= 60:          # ~2 saniye
+                show_game(game)
+                return
+            state["anim"] = root.after(33, spin)
+
+        spin()
+
+    # ---------- OYUN SAYFASI ----------
+    def show_game(game):
+        clear()
+        box = tk.Frame(page, bg=WHITE)
+        box.pack(fill="x", padx=60, pady=(70, 20))
+        tk.Label(box, text=game["name"], fg=DARK, bg=WHITE,
+                 font=("Segoe UI", 34, "bold")).pack(anchor="w")
+        tk.Label(box, text=game["file"], fg=GREY, bg=WHITE,
+                 font=("Consolas", 11)).pack(anchor="w", pady=(4, 0))
+        tk.Label(box, text=game["desc"], fg=GREY, bg=WHITE, font=("Segoe UI", 13),
+                 wraplength=800, justify="left").pack(anchor="w", pady=(20, 28))
+        tk.Button(box, text="Play", fg=WHITE, bg=RED, activebackground="#b80500",
+                  activeforeground=WHITE, relief="flat", font=("Segoe UI", 13, "bold"),
+                  padx=36, pady=12, cursor="hand2",
+                  command=lambda: None).pack(anchor="w")   # şimdilik bir şey yapmıyor
+        tk.Button(box, text="← Geri", fg=DARK, bg=WHITE, relief="flat",
+                  font=("Segoe UI", 11), cursor="hand2",
+                  command=show_home).pack(anchor="w", pady=(20, 0))
+
+    home_btn.bind("<Button-1>", lambda e: show_home())
+
+    # ---------- Alt bilgi ----------
+    footer = tk.Frame(root, bg=LIGHT, highlightbackground=LINE, highlightthickness=1)
+    footer.pack(fill="x", side="bottom")
     tk.Label(footer, text="© LOAD SYSTEM", fg=GREY, bg=LIGHT,
-             font=("Segoe UI", 10)).pack(pady=18)
+             font=("Segoe UI", 10)).pack(pady=12)
+
+    show_home()   # program açılınca ilk ana menü gelir
