@@ -1,8 +1,13 @@
-import tkinter as tk
-import threading
-import queue
+import os
+import re
+import sys
 import time
+import queue
+import tempfile
+import threading
+import subprocess
 import urllib.request
+import tkinter as tk
 
 WHITE = "#ffffff"
 RED = "#e10600"
@@ -12,20 +17,73 @@ LIGHT = "#f6f6f6"
 LINE = "#e5e5e5"
 
 BASE = "https://raw.githubusercontent.com/scpstudioofficaltr-spec/load-system-by-crgame/refs/heads/main/"
-LIST_URLS = [BASE + "game/list", BASE + "oyun/list"]   # sırayla denenir
+LIST_URLS = [BASE + "game/list", BASE + "oyun/list"]
+APP_URL = BASE + "apppy"
+
+TMP = tempfile.gettempdir()
+LOG_PATH = os.path.join(TMP, "crgame_game.log")
+RUNNER_PATH = os.path.join(TMP, "crgame_runner.py")
 
 FALLBACK = [{"name": "Örnek Oyun", "file": "ornek_oyun.py", "url": None,
              "desc": "Liste alınamadı. Bu bir örnek oyundur."}]
 
+# Oyunu ayrı bir uygulama (ayrı süreç) olarak açan küçük program
+RUNNER = r'''
+import sys, ctypes
+import tkinter as tk
+
+def main():
+    path, slug, icon, kind = sys.argv[1:5]
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        pass
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("crgame.game." + slug)
+    except Exception:
+        pass
+    root = tk.Tk()
+    root.withdraw()
+    if kind == "ico":
+        try:
+            root.iconbitmap(default=icon)
+        except tk.TclError:
+            pass
+    elif kind == "png":
+        try:
+            img = tk.PhotoImage(file=icon)
+            root.iconphoto(True, img)
+            root._img = img
+        except tk.TclError:
+            pass
+    with open(path, encoding="utf-8") as f:
+        src = f.read()
+    ns = {"__name__": "game"}
+    exec(compile(src, path, "exec"), ns)
+    ns["play"](root)
+
+    def watch():
+        if not any(w.winfo_class() == "Toplevel" for w in root.winfo_children()):
+            root.destroy()
+            return
+        root.after(300, watch)
+    root.after(500, watch)
+    root.mainloop()
+
+main()
+'''
+
 
 def fetch_bytes(url, timeout=15):
+    if "raw.githubusercontent.com" in url:          # önbelleği atlat
+        url += ("&" if "?" in url else "?") + "t=" + str(int(time.time()))
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read()
 
 
 def parse_line(line):
-    """isim | açıklama | url   (açıklama ve url isteğe bağlı)"""
+    """isim | açıklama | raw url   (açıklama ve url isteğe bağlı)"""
     parts = [p.strip() for p in line.split("|")]
     url = None
     if len(parts) > 1 and parts[-1].lower().startswith("http"):
@@ -39,9 +97,9 @@ def parse_line(line):
 
 
 def fetch_games():
-    for base in LIST_URLS:
+    for u in LIST_URLS:
         try:
-            text = fetch_bytes(base + "?t=" + str(int(time.time())), 8).decode("utf-8", errors="ignore")
+            text = fetch_bytes(u, 8).decode("utf-8", errors="ignore")
         except Exception:
             continue
         games = []
@@ -54,16 +112,64 @@ def fetch_games():
     return FALLBACK
 
 
+def find_icon():
+    """Loader'ın indirdiği ikonu bulur (aynı ikon oyunda da kullanılır)."""
+    ico = os.path.join(TMP, "crgame_app_icon.ico")
+    png = os.path.join(TMP, "crgame_app_icon.png")
+    if os.path.exists(ico):
+        return ico, "ico"
+    if os.path.exists(png):
+        return png, "png"
+    return "-", "none"
+
+
+def start_process(game, code):
+    """Oyun kodunu diske yazar ve ayrı bir uygulama olarak başlatır."""
+    if getattr(sys, "frozen", False):
+        raise RuntimeError("Ayrı uygulama olarak açmak için programı Python ile çalıştır (exe olmaz).")
+    slug = re.sub(r"[^a-z0-9]", "", game["file"].lower().replace(".py", "")) or "game"
+    gpath = os.path.join(TMP, "crgame_game_%s.py" % slug)
+    with open(gpath, "wb") as f:
+        f.write(code)
+    with open(RUNNER_PATH, "w", encoding="utf-8") as f:
+        f.write(RUNNER)
+    icon, kind = find_icon()
+    log = open(LOG_PATH, "w")
+    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    try:
+        return subprocess.Popen([sys.executable, RUNNER_PATH, gpath, slug, icon, kind],
+                                stdout=log, stderr=log, creationflags=flags)
+    finally:
+        log.close()
+
+
+def log_tail():
+    try:
+        with open(LOG_PATH, encoding="utf-8", errors="ignore") as f:
+            lines = [l.strip() for l in f.read().splitlines() if l.strip()]
+        return lines[-1][:150] if lines else "unknown error"
+    except OSError:
+        return "unknown error"
+
+
 def build(root):
     root.title("LOAD SYSTEM")
     root.configure(bg=WHITE)
     for w in root.winfo_children():
         w.destroy()
 
-    state = {"anim": None, "games": None}
+    state = {"anim": None, "games": None, "proc": None, "game": None,
+             "user_closed": False, "dead": False}
     q = queue.Queue()
 
+    def proc_alive():
+        p = state["proc"]
+        return p is not None and p.poll() is None
+
+    # ---------- Arka plan işleri ----------
     def poll():
+        if state["dead"]:
+            return
         try:
             while True:
                 cb, res = q.get_nowait()
@@ -91,9 +197,30 @@ def build(root):
     nav.pack(fill="x", side="top")
     tk.Label(nav, text="LOAD SYSTEM", fg=RED, bg=WHITE,
              font=("Segoe UI", 16, "bold")).pack(side="left", padx=24, pady=14)
+    upd = tk.Button(nav, text="Update", fg=RED, bg=WHITE, activeforeground=WHITE,
+                    activebackground=RED, relief="solid", bd=1,
+                    font=("Segoe UI", 11, "bold"), padx=16, pady=4, cursor="hand2",
+                    disabledforeground="#bbbbbb",
+                    command=lambda: do_update())
+    upd.pack(side="right", padx=(8, 24))
     home_btn = tk.Label(nav, text="Ana Menü", fg=DARK, bg=WHITE,
                         font=("Segoe UI", 11), cursor="hand2")
     home_btn.pack(side="right", padx=16)
+    note_lbl = tk.Label(nav, text="", fg=GREY, bg=WHITE, font=("Segoe UI", 10))
+    note_lbl.pack(side="right", padx=8)
+
+    def note(text, ms=5000):
+        try:
+            note_lbl.config(text=text)
+            if text:
+                root.after(ms, lambda: note_lbl.winfo_exists() and note_lbl.config(text=""))
+        except tk.TclError:
+            pass
+
+    pending = getattr(root, "_crgame_note", "")
+    if pending:
+        root._crgame_note = ""
+        note(pending)
 
     # ---------- Kaydırılabilir gövde ----------
     body = tk.Frame(root, bg=WHITE)
@@ -118,6 +245,45 @@ def build(root):
         for w in page.winfo_children():
             w.destroy()
         canvas.yview_moveto(0)
+
+    # ---------- UPDATE ----------
+    def do_update():
+        if proc_alive():
+            note("Close the game first.")
+            return
+        upd.config(text="Updating...", state="disabled")
+        note("")
+
+        def work():
+            data = fetch_bytes(APP_URL, 20)
+            if not data.strip():
+                raise ValueError("empty file")
+            ns = {"__name__": "apppy", "root": root}
+            exec(compile(data.decode("utf-8"), "apppy", "exec"), ns)
+            if "build" not in ns:
+                raise ValueError("build() not found")
+            return ns
+
+        def done(res):
+            try:
+                if state["anim"]:
+                    root.after_cancel(state["anim"])
+                    state["anim"] = None
+            except tk.TclError:
+                return
+            state["dead"] = True
+            if isinstance(res, Exception):
+                root._crgame_note = "Update failed: " + str(res)[:70]
+                build(root)                    # eski arayüze geri dön
+                return
+            root._crgame_note = "Updated ✓"
+            try:
+                res["build"](root)             # yeni kodla arayüzü yeniden kur
+            except Exception as e:
+                root._crgame_note = "Update failed: " + str(e)[:70]
+                build(root)
+
+        bg(work, done)
 
     # ---------- ANA MENÜ ----------
     def show_home():
@@ -175,7 +341,6 @@ def build(root):
         c.pack()
         tk.Label(box, text=f"{game['name']} yükleniyor...", fg=DARK, bg=WHITE,
                  font=("Segoe UI", 14)).pack(pady=(20, 0))
-
         c.create_oval(10, 10, 80, 80, outline=LINE, width=6)
         arc = c.create_arc(10, 10, 80, 80, start=0, extent=100,
                            style="arc", outline=RED, width=6)
@@ -192,30 +357,6 @@ def build(root):
         spin()
 
     # ---------- OYUN SAYFASI ----------
-    def launch(game, btn, msg):
-        if not game.get("url"):
-            msg.config(text="Bu oyun için listede bağlantı (url) yok.", fg=RED)
-            return
-        btn.config(text="Yükleniyor...", state="disabled")
-        msg.config(text="", fg=GREY)
-
-        def done(res):
-            try:
-                btn.config(text="Play", state="normal")
-            except tk.TclError:
-                return
-            if isinstance(res, Exception):
-                msg.config(text="Oyun indirilemedi: " + str(res)[:120], fg=RED)
-                return
-            try:
-                ns = {"__name__": "game"}
-                exec(compile(res.decode("utf-8"), game["file"], "exec"), ns)
-                ns["play"](root)
-            except Exception as e:
-                msg.config(text="Oyun hatası: " + str(e)[:150], fg=RED)
-
-        bg(lambda: fetch_bytes(game["url"]), done)
-
     def show_game(game):
         clear()
         box = tk.Frame(page, bg=WHITE)
@@ -226,17 +367,97 @@ def build(root):
                  font=("Consolas", 11)).pack(anchor="w", pady=(4, 0))
         tk.Label(box, text=game["desc"], fg=GREY, bg=WHITE, font=("Segoe UI", 13),
                  wraplength=800, justify="left").pack(anchor="w", pady=(20, 28))
-        play_btn = tk.Button(box, text="Play", fg=WHITE, bg=RED, activebackground="#b80500",
-                             activeforeground=WHITE, relief="flat",
-                             font=("Segoe UI", 13, "bold"), padx=36, pady=12, cursor="hand2")
-        play_btn.pack(anchor="w")
+
+        row = tk.Frame(box, bg=WHITE)
+        row.pack(anchor="w")
+        play_btn = tk.Button(row, text="Play", fg=WHITE, bg=RED, activebackground="#b80500",
+                             activeforeground=WHITE, disabledforeground="#ffd0ce",
+                             relief="flat", font=("Segoe UI", 13, "bold"),
+                             padx=36, pady=12, cursor="hand2")
+        play_btn.pack(side="left")
+        close_btn = tk.Button(row, text="Close", fg=DARK, bg=WHITE, activebackground=LIGHT,
+                              disabledforeground="#bbbbbb", relief="solid", bd=1,
+                              font=("Segoe UI", 13, "bold"), padx=30, pady=11, cursor="hand2")
+        close_btn.pack(side="left", padx=(12, 0))
         msg = tk.Label(box, text="", fg=GREY, bg=WHITE, font=("Segoe UI", 11),
                        wraplength=800, justify="left")
         msg.pack(anchor="w", pady=(12, 0))
-        play_btn.config(command=lambda: launch(game, play_btn, msg))
         tk.Button(box, text="← Geri", fg=DARK, bg=WHITE, relief="flat",
                   font=("Segoe UI", 11), cursor="hand2",
                   command=show_home).pack(anchor="w", pady=(20, 0))
+
+        ui = {"busy": False}
+
+        def sync():
+            alive = proc_alive()
+            mine = alive and state["game"] == game["name"]
+            if mine:
+                play_btn.config(text="Playing", state="disabled")
+                close_btn.config(state="normal")
+                msg.config(text="The game is running in its own window.", fg=GREY)
+            elif ui["busy"]:
+                play_btn.config(text="Loading...", state="disabled")
+                close_btn.config(state="disabled")
+            elif alive:
+                play_btn.config(text="Play", state="disabled")
+                close_btn.config(state="normal")
+                msg.config(text="Another game is running. Close it first.", fg=GREY)
+            else:
+                play_btn.config(text="Play", state="normal")
+                close_btn.config(state="disabled")
+
+        def start():
+            if proc_alive() or ui["busy"]:
+                return
+            if not game.get("url"):
+                msg.config(text="Bu oyun için listede bağlantı (url) yok.", fg=RED)
+                return
+            ui["busy"] = True
+            msg.config(text="", fg=GREY)
+            sync()
+
+            def done(res):
+                ui["busy"] = False
+                try:
+                    if isinstance(res, Exception):
+                        msg.config(text="Download failed: " + str(res)[:120], fg=RED)
+                    else:
+                        try:
+                            state["proc"] = start_process(game, res)
+                            state["game"] = game["name"]
+                            state["user_closed"] = False
+                        except Exception as e:
+                            msg.config(text="Could not start: " + str(e)[:150], fg=RED)
+                    sync()
+                except tk.TclError:
+                    pass
+
+            bg(lambda: fetch_bytes(game["url"]), done)
+
+        def stop():
+            p = state["proc"]
+            if p is not None and p.poll() is None:
+                state["user_closed"] = True
+                p.terminate()
+
+        def tick():
+            p = state["proc"]
+            if p is not None and p.poll() is not None:
+                rc = p.returncode
+                state["proc"] = None
+                if state["user_closed"]:
+                    state["user_closed"] = False
+                    msg.config(text="")
+                elif rc not in (0, None):
+                    msg.config(text="Game error: " + log_tail(), fg=RED)
+                else:
+                    msg.config(text="")
+            sync()
+            state["anim"] = root.after(400, tick)
+
+        play_btn.config(command=start)
+        close_btn.config(command=stop)
+        tick()
 
     home_btn.bind("<Button-1>", lambda e: show_home())
 
