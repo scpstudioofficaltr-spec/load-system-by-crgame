@@ -3,24 +3,63 @@ import random
 import time
 import tkinter as tk
 
-TITLE = "SAN NOVA"
-TS = 40                 # bir karonun piksel boyutu
-MW = MH = 90            # harita boyutu (karo)
-BLK = 10                # bir blok boyutu (karo)
-RW = 2                  # yol genişliği (karo)
+TITLE = "SAN NOVA 2D"
+TS = 40                     # karo boyu (piksel)
+BLK = 10                    # blok boyu (karo)
+NB = 9                      # blok sayısı (NB x NB)
+MW = MH = NB * BLK          # harita boyutu (karo)
 ROAD, SIDE, BLDG, PARK = 0, 1, 2, 3
 MAX_WANTED = 5
-POLICE_C = "#1e3a8a"
-ROAD_C, SIDE_C, PARK_C = "#33373f", "#8c8c8c", "#2d6a4f"
-BLDG_COLS = ["#5b6573", "#7a5c4a", "#4f6b5c", "#8a8152", "#6a4f7a", "#3f4c63", "#9c6b4e"]
-CAR_COLS = ["#d62828", "#1d4ed8", "#f5f5f5", "#111111", "#f4a261", "#2a9d8f", "#7209b7"]
-PED_COLS = ["#e9c46a", "#264653", "#e76f51", "#a8dadc", "#ffffff", "#8d99ae"]
-PART_COLS = ["#ff7b00", "#ffd166", "#ff3d3d", "#444444"]
-STAR_C = "#ffd60a"
+
+C_ROAD = "#2b2f38"
+C_ROAD_ALT = "#2f3440"
+C_LANE = "#f2c94c"
+C_WALK = "#bdb8aa"
+C_WALK_JOINT = "#a59f90"
+C_GRASS = "#3f7d4a"
+C_GRASS_ALT = "#397247"
+C_PATH = "#d6c6a0"
+C_TREE = "#2a5e36"
+C_TREE_HI = "#5aa86a"
+C_SHADOW = "#1b1e25"
+C_SHADOW_SOFT = "#23262e"
+C_BLD_SHADOW = "#1c1f25"
+C_HUD = "#0b0e14"
+C_HUD_EDGE = "#2c3240"
+C_YELLOW = "#ffd60a"
+C_POLICE = "#1e3a8a"
+C_TEXT = "#eef1f7"
+C_MUTED = "#9aa3b5"
+
+BLDG_PAL = [("#6f7d8c", "#8a99a8"), ("#b98b6b", "#d1a685"), ("#7c9a86", "#9bb8a4"),
+            ("#a7a06a", "#c4bf86"), ("#8e7aa6", "#a998c2"), ("#5d6f8f", "#7889ab")]
+CAR_PAL = ["#e63946", "#1d70e0", "#f1f1f1", "#2b2b2b", "#f4a261", "#2a9d8f", "#9b5de5", "#ffd166"]
+SHIRT_PAL = ["#ffd166", "#06d6a0", "#ef476f", "#118ab2", "#f8f9fa", "#adb5bd", "#8338ec"]
+SKIN_PAL = ["#f1c27d", "#c68642", "#8d5524", "#ffdbac"]
 
 
+# ---------- Renk ve geometri yardımcıları ----------
 def clamp(v, lo, hi):
     return lo if v < lo else hi if v > hi else v
+
+
+def rgb(h):
+    return int(h[1:3], 16), int(h[3:5], 16), int(h[5:7], 16)
+
+
+def mixc(a, b, t):
+    t = clamp(t, 0.0, 1.0)
+    ra, ga, ba = rgb(a)
+    rb, gb, bb = rgb(b)
+    return "#%02x%02x%02x" % (int(ra + (rb - ra) * t), int(ga + (gb - ga) * t),
+                              int(ba + (bb - ba) * t))
+
+
+def shade(c, f):
+    """f < 1: koyulaştır, f > 1: açıklaştır."""
+    if f < 1:
+        return mixc(c, "#000000", 1 - f)
+    return mixc(c, "#ffffff", f - 1)
 
 
 def angdiff(a, b):
@@ -36,53 +75,71 @@ def rot_rect(cx, cy, a, L, W):
     return out
 
 
+def local_pt(cx, cy, a, lx, ly):
+    c, s = math.cos(a), math.sin(a)
+    return cx + lx * c - ly * s, cy + lx * s + ly * c
+
+
+# ---------- Harita ----------
 def gen_city(rnd):
     tiles = [[ROAD] * MW for _ in range(MH)]
-    cols = [[ROAD_C] * MW for _ in range(MH)]
     blocks = {}
+    for by in range(NB):
+        for bx in range(NB):
+            kind = BLDG if rnd.random() < 0.72 else PARK
+            wall, roof = rnd.choice(BLDG_PAL)
+            blocks[(bx, by)] = {"kind": kind, "wall": wall, "roof": roof,
+                                "seed": rnd.randrange(1000)}
+            for ly in range(BLK):
+                for lx in range(BLK):
+                    tx, ty = bx * BLK + lx, by * BLK + ly
+                    if lx < 2 or ly < 2:
+                        t = ROAD
+                    elif lx in (2, 9) or ly in (2, 9):
+                        t = SIDE
+                    else:
+                        t = kind
+                    tiles[ty][tx] = t
+    return tiles, blocks
+
+
+def build_minimap(master, tiles, blocks):
+    rows = []
     for ty in range(MH):
+        row = []
         for tx in range(MW):
-            bx, by = tx % BLK, ty % BLK
-            if bx < RW or by < RW:
-                continue                      # yol
-            if bx == RW or by == RW:
-                tiles[ty][tx] = SIDE          # kaldırım
-                cols[ty][tx] = SIDE_C
-                continue
-            key = (tx // BLK, ty // BLK)
-            if key not in blocks:
-                if rnd.random() < 0.78:
-                    blocks[key] = (BLDG, rnd.choice(BLDG_COLS))
-                else:
-                    blocks[key] = (PARK, PARK_C)
-            t, c = blocks[key]
-            tiles[ty][tx] = t
-            cols[ty][tx] = c
-    return tiles, cols
-
-
-def build_minimap(master, cols):
+            t = tiles[ty][tx]
+            if t == ROAD:
+                c = C_ROAD
+            elif t == SIDE:
+                c = C_WALK
+            elif t == PARK:
+                c = C_GRASS
+            else:
+                c = blocks[(tx // BLK, ty // BLK)]["wall"]
+            row.append(c)
+        rows.append("{" + " ".join(row) + "}")
     img = tk.PhotoImage(master=master, width=MW, height=MH)
-    rows = ["{" + " ".join(cols[ty]) + "}" for ty in range(MH)]
     img.put(" ".join(rows), to=(0, 0))
     return img.zoom(2, 2)
 
 
+# ---------- Oyun ----------
 class Game:
     def __init__(self, parent):
         self.win = tk.Toplevel(parent)
-        self.win.title(TITLE + " - GTA")
-        self.win.configure(bg="black")
+        self.win.title(TITLE)
+        self.win.configure(bg=C_HUD)
         try:
             self.win.state("zoomed")
         except tk.TclError:
             self.win.geometry("1200x750")
-        self.cv = tk.Canvas(self.win, bg="#222222", highlightthickness=0)
+        self.cv = tk.Canvas(self.win, bg=C_ROAD, highlightthickness=0)
         self.cv.pack(fill="both", expand=True)
 
-        self.rnd = random.Random(2024)
-        self.tiles, self.cols = gen_city(self.rnd)
-        self.mini = build_minimap(self.win, self.cols)
+        self.rnd = random.Random(2025)
+        self.tiles, self.blocks = gen_city(self.rnd)
+        self.mini = build_minimap(self.win, self.tiles, self.blocks)
 
         self.keys = set()
         self.mx, self.my = 400, 300
@@ -95,7 +152,11 @@ class Game:
         self.cam_x = self.cam_y = 0.0
 
         self.px, self.py = self.free_point(road=True)
+        self.cam_x = self.px - self.w / 2
+        self.cam_y = self.py - self.h / 2
         self.pa = 0.0
+        self.walking = False
+        self.walk_t = 0.0
         self.hp = 100.0
         self.cash = 500
         self.wanted = 0
@@ -103,16 +164,19 @@ class Game:
         self.cool = 0.0
         self.shot_t = -10.0
         self.police_t = 0.0
+        self.skid_t = 0.0
         self.down_t = 0.0
         self.car = None
         self.msg = "San Nova'ya hoş geldin"
         self.msg_t = 4.0
         self.bullets = []
         self.parts = []
+        self.skids = []
 
-        self.cars = [self.new_traffic() for _ in range(40)]
-        self.cars += [self.new_parked() for _ in range(22)]
-        self.peds = [self.new_ped() for _ in range(70)]
+        self.cars = [self.new_traffic() for _ in range(38)]
+        self.cars += [self.new_parked() for _ in range(18)]
+        self.peds = [self.new_ped() for _ in range(60)]
+        self.coins = [self.new_coin() for _ in range(30)]
         self.mission = None
         self.mission_reward = 0
         self.new_mission()
@@ -127,7 +191,7 @@ class Game:
         w.focus_force()
         self.loop()
 
-    # ---------- Yardımcılar ----------
+    # ----- yardımcılar -----
     def say(self, text, t=3.0):
         self.msg = text
         self.msg_t = t
@@ -137,7 +201,7 @@ class Game:
             tx = self.rnd.randrange(MW)
             ty = self.rnd.randrange(MH)
             t = self.tiles[ty][tx]
-            if t == BLDG or (road and t != ROAD):
+            if t in (BLDG, PARK) or (road and t != ROAD):
                 continue
             return (tx + 0.5) * TS, (ty + 0.5) * TS
 
@@ -167,31 +231,31 @@ class Game:
         c["x"], c["y"] = nx, ny
         return True
 
-    def explode(self, x, y, n):
+    def explode(self, x, y, n, cols=("#ff7b00", "#ffd166", "#ff3d3d", "#6b6f78")):
         for _ in range(n):
             a = self.rnd.uniform(0, math.tau)
-            s = self.rnd.uniform(60, 260)
+            s = self.rnd.uniform(60, 240)
             self.parts.append({"x": x, "y": y, "dx": math.cos(a) * s, "dy": math.sin(a) * s,
                                "life": self.rnd.uniform(0.3, 0.8),
-                               "col": self.rnd.choice(PART_COLS)})
+                               "col": self.rnd.choice(cols), "r": self.rnd.uniform(2, 4)})
 
-    # ---------- Oluşturma ----------
+    # ----- oluşturma -----
     def new_traffic(self):
         r = self.rnd
         if r.random() < 0.5:
-            base = r.randrange(0, MH // BLK) * BLK
+            base = r.randrange(0, NB) * BLK
             lane = r.choice((0.5, 1.5))
             y = (base + lane) * TS
             x = r.uniform(0, MW * TS)
             a = 0.0 if lane == 0.5 else math.pi
         else:
-            base = r.randrange(0, MW // BLK) * BLK
+            base = r.randrange(0, NB) * BLK
             lane = r.choice((0.5, 1.5))
             x = (base + lane) * TS
             y = r.uniform(0, MH * TS)
             a = math.pi / 2 if lane == 0.5 else -math.pi / 2
         return {"kind": "traffic", "x": x, "y": y, "a": a, "v": r.uniform(90, 150),
-                "col": r.choice(CAR_COLS), "hp": 3.0, "cool": 0.0}
+                "col": r.choice(CAR_PAL), "hp": 3.0, "brake": False}
 
     def new_parked(self):
         c = self.new_traffic()
@@ -203,14 +267,19 @@ class Game:
     def new_ped(self):
         x, y = self.free_point()
         return {"x": x, "y": y, "a": self.rnd.uniform(0, math.tau),
-                "t": self.rnd.uniform(1, 3), "col": self.rnd.choice(PED_COLS),
-                "sp": self.rnd.uniform(35, 60), "dead": False}
+                "t": self.rnd.uniform(1, 3), "shirt": self.rnd.choice(SHIRT_PAL),
+                "skin": self.rnd.choice(SKIN_PAL), "sp": self.rnd.uniform(30, 55),
+                "ph": self.rnd.uniform(0, 6), "dead": False}
+
+    def new_coin(self):
+        x, y = self.free_point(road=True)
+        return {"x": x, "y": y, "ph": self.rnd.uniform(0, 6)}
 
     def new_mission(self):
         self.mission = self.free_point()
         self.mission_reward = self.rnd.randrange(300, 1250, 50)
 
-    # ---------- Girdi ----------
+    # ----- girdi -----
     def on_down(self, e):
         k = e.keysym.lower()
         if k == "escape":
@@ -233,18 +302,17 @@ class Game:
         except tk.TclError:
             pass
 
-    # ---------- Araç binme/inme ----------
+    # ----- araç -----
     def toggle_car(self):
         if self.car is not None:
             c = self.car
             self.leave_car()
-            a = c["a"] + math.pi / 2
-            nx, ny = self.px + math.cos(a) * 30, self.py + math.sin(a) * 30
+            nx, ny = local_pt(c["x"], c["y"], c["a"], 0, 30)
             if not self.blocked(nx, ny, 8):
                 self.px, self.py = nx, ny
             self.say("Araçtan indin")
             return
-        best, bd = None, 48
+        best, bd = None, 46
         for c in self.cars:
             if c["kind"] != "parked" or abs(c["v"]) > 15:
                 continue
@@ -256,23 +324,27 @@ class Game:
             best["kind"] = "mine"
             best["hp"] = max(best["hp"], 6.0)
             self.car = best
-            self.say("Araca bindin - W/S gaz/fren, A/D yönlendir")
+            self.say("Araca bindin  |  W/S gaz-fren, A/D yön")
 
     def leave_car(self):
         if self.car is not None:
             c = self.car
             c["kind"] = "parked"
             c["v"] = 0.0
+            c["brake"] = False
             self.cars.append(c)
             self.car = None
 
-    # ---------- Güncelleme ----------
+    # ----- güncelleme -----
     def update(self, dt):
         self.t += dt
         if self.msg_t > 0:
             self.msg_t -= dt
-        self.cam_x = self.px - self.w / 2
-        self.cam_y = self.py - self.h / 2
+        target_x = self.px - self.w / 2
+        target_y = self.py - self.h / 2
+        k = min(1.0, dt * 9)
+        self.cam_x += (target_x - self.cam_x) * k
+        self.cam_y += (target_y - self.cam_y) * k
         if self.down_t > 0:
             self.down_t -= dt
             if self.down_t <= 0:
@@ -291,10 +363,12 @@ class Game:
             dx = (1 if "d" in k else 0) - (1 if "a" in k else 0)
             dy = (1 if "s" in k else 0) - (1 if "w" in k else 0)
             self.pa = math.atan2(self.my + self.cam_y - self.py, self.mx + self.cam_x - self.px)
+            self.walking = bool(dx or dy)
             if dx or dy:
                 n = math.hypot(dx, dy)
                 sp = 150 * (1.9 if sprint else 1.0) * dt
                 self.px, self.py = self.move(self.px, self.py, dx / n * sp, dy / n * sp, 8)
+                self.walk_t += dt * (1.9 if sprint else 1.0)
             self.cool -= dt
             if (self.firing or "space" in k) and self.cool <= 0:
                 self.cool = 0.16
@@ -302,6 +376,7 @@ class Game:
         else:
             self.drive_player(dt)
             self.px, self.py = self.car["x"], self.car["y"]
+            self.walking = False
             self.cool -= dt
             if (self.firing or "space" in k) and self.cool <= 0:
                 self.cool = 0.3
@@ -313,6 +388,7 @@ class Game:
         sprint = "shift_l" in k or "shift_r" in k
         fwd = "w" in k or "up" in k
         back = "s" in k or "down" in k
+        c["brake"] = back
         if fwd:
             c["v"] += 260 * dt
         elif back:
@@ -325,6 +401,16 @@ class Game:
             sign = 1 if c["v"] > 0 else -1
             c["a"] += steer * sign * 2.4 * dt * min(1.0, abs(c["v"]) / 140)
         c["v"] *= (1 - 0.1 * dt)
+
+        # Kayma izi (hızlı dönüşte)
+        self.skid_t -= dt
+        if steer and abs(c["v"]) > 180 and self.skid_t <= 0:
+            self.skid_t = 0.03
+            rx, ry = local_pt(c["x"], c["y"], c["a"], -16, 9)
+            lx, ly = local_pt(c["x"], c["y"], c["a"], -16, -9)
+            self.skids.append([rx, ry, 0.0])
+            self.skids.append([lx, ly, 0.0])
+
         v0 = abs(c["v"])
         if not self.drive(c, dt):
             if v0 > 100:
@@ -337,16 +423,18 @@ class Game:
     def fire(self, a):
         self.shot_t = self.t
         self.bullets.append({"x": self.px + math.cos(a) * 14, "y": self.py + math.sin(a) * 14,
-                             "dx": math.cos(a) * 720, "dy": math.sin(a) * 720,
+                             "dx": math.cos(a) * 760, "dy": math.sin(a) * 760,
                              "life": 0.9, "by": "p"})
 
     def update_world(self, dt):
         self.update_cars(dt)
         self.update_peds(dt)
         self.update_bullets(dt)
+        self.update_coins()
         self.update_wanted(dt)
         self.check_mission()
         self.spawn_stuff(dt)
+        self.skids = [[x, y, a + dt] for x, y, a in self.skids if a + dt < 2.5]
 
     def update_cars(self, dt):
         for c in self.cars:
@@ -388,7 +476,7 @@ class Game:
         if not self.drive(c, dt, 14):
             c["a"] += self.rnd.choice((-1.4, 1.4))
             c["v"] = 120
-        c["cool"] -= dt
+        c["cool"] = c.get("cool", 1.0) - dt
         if d < 300 and c["cool"] <= 0 and self.down_t <= 0:
             c["cool"] = self.rnd.uniform(0.9, 1.6)
             a = want + self.rnd.uniform(-0.12, 0.12)
@@ -405,13 +493,13 @@ class Game:
         self.explode(o["x"], o["y"], 26)
         if o["kind"] == "police":
             self.cash += 250
-            self.say("Polis aracı imha edildi! +$250")
+            self.say("Polis aracı imha edildi!  +$250")
         else:
             self.add_wanted(1)
 
     def car_wreck(self):
         c = self.car
-        self.explode(c["x"], c["y"], 30)
+        self.explode(c["x"], c["y"], 30, cols=("#ff7b00", "#ffd166", "#ff3d3d", "#2b2b2b"))
         self.car = None
         self.hurt(60)
 
@@ -438,8 +526,10 @@ class Game:
                 if math.hypot(p["x"] - self.car["x"], p["y"] - self.car["y"]) < 20:
                     p["dead"] = True
                     self.add_wanted(1)
-                    self.explode(p["x"], p["y"], 8)
+                    self.explode(p["x"], p["y"], 8, cols=("#b00020", "#ff4d4d", "#6b6f78"))
         self.peds = [p for p in self.peds if not p["dead"]]
+        if len(self.peds) < 60 and self.rnd.random() < 0.02:
+            self.peds.append(self.new_ped())
 
     def update_bullets(self, dt):
         alive = []
@@ -456,13 +546,14 @@ class Game:
                         p["dead"] = True
                         hit = True
                         self.add_wanted(1)
-                        self.explode(p["x"], p["y"], 8)
+                        self.explode(p["x"], p["y"], 8, cols=("#b00020", "#ff4d4d", "#6b6f78"))
                         break
                 if not hit:
                     for c in list(self.cars):
                         if math.hypot(c["x"] - b["x"], c["y"] - b["y"]) < 18:
                             c["hp"] -= 1
                             hit = True
+                            self.explode(b["x"], b["y"], 3)
                             if c["hp"] <= 0:
                                 self.destroy_car(c)
                             break
@@ -479,6 +570,14 @@ class Game:
             if not hit:
                 alive.append(b)
         self.bullets = alive
+
+    def update_coins(self):
+        ref = (self.px, self.py)
+        for i, co in enumerate(self.coins):
+            if math.hypot(co["x"] - ref[0], co["y"] - ref[1]) < 22:
+                self.cash += 15
+                self.explode(co["x"], co["y"], 5, cols=(C_YELLOW, "#fff3b0"))
+                self.coins[i] = self.new_coin()
 
     def update_wanted(self, dt):
         cops_near = any(c["kind"] == "police" and
@@ -507,18 +606,18 @@ class Game:
             y = self.py + math.sin(a) * 520
             if not self.blocked(x, y, 14):
                 self.cars.append({"kind": "police", "x": x, "y": y, "a": a + math.pi,
-                                  "v": 120.0, "col": POLICE_C, "hp": 4.0, "cool": 1.0})
-        if len(self.peds) < 70 and self.rnd.random() < 0.02:
-            self.peds.append(self.new_ped())
+                                  "v": 120.0, "col": C_POLICE, "hp": 4.0, "cool": 1.0,
+                                  "brake": False})
         traffic = sum(1 for c in self.cars if c["kind"] == "traffic")
-        if traffic < 40 and self.rnd.random() < 0.02:
+        if traffic < 38 and self.rnd.random() < 0.02:
             self.cars.append(self.new_traffic())
 
     def check_mission(self):
         mx, my = self.mission
         if math.hypot(self.px - mx, self.py - my) < 36:
             self.cash += self.mission_reward
-            self.say("Görev tamamlandı! +$%d" % self.mission_reward)
+            self.say("Görev tamamlandı!  +$%d" % self.mission_reward)
+            self.explode(mx, my, 24, cols=(C_YELLOW, "#ffffff", "#ff7b00"))
             self.new_mission()
 
     def update_fx(self, dt):
@@ -546,7 +645,7 @@ class Game:
         self.cash = int(self.cash * 0.5)
         self.wanted = 0
         self.down_t = 3.5
-        self.say("WASTED - paranın yarısını kaybettin", 3.5)
+        self.say("WASTED  -  paranın yarısını kaybettin", 3.5)
 
     def respawn(self):
         self.px, self.py = self.free_point(road=True)
@@ -555,7 +654,7 @@ class Game:
         self.bullets = []
         self.say("Hastanede uyandın")
 
-    # ---------- Çizim ----------
+    # ----- çizim -----
     def render(self):
         cv = self.cv
         cv.delete("all")
@@ -567,54 +666,131 @@ class Game:
         x1 = min(MW - 1, int((cam_x + self.w) // TS))
         y0 = max(0, int(cam_y // TS))
         y1 = min(MH - 1, int((cam_y + self.h) // TS))
+
+        # 1) Zemin: yollar, kaldırımlar
         for ty in range(y0, y1 + 1):
             for tx in range(x0, x1 + 1):
+                t = self.tiles[ty][tx]
+                if t in (BLDG, PARK):
+                    continue                       # blok olarak aşağıda çizilir
                 sx = tx * TS - cam_x
                 sy = ty * TS - cam_y
-                t = self.tiles[ty][tx]
-                if t == BLDG:
-                    cv.create_rectangle(sx, sy, sx + TS, sy + TS, fill=self.cols[ty][tx],
-                                        outline="#15151f")
-                    cv.create_rectangle(sx + 6, sy + 6, sx + TS - 6, sy + TS - 6,
-                                        fill="#00000022", outline="")
-                    continue
-                cv.create_rectangle(sx, sy, sx + TS, sy + TS, fill=self.cols[ty][tx], outline="")
-                if t == PARK and (tx * 7 + ty * 13) % 5 == 0:
-                    cv.create_oval(sx + 10, sy + 10, sx + 30, sy + 30, fill="#1b4332", outline="")
                 if t == ROAD:
-                    bx, by = tx % BLK, ty % BLK
-                    if by == 0 and bx >= RW and tx % 2 == 0:
-                        cv.create_line(sx + 4, sy + TS, sx + TS - 4, sy + TS, fill="#f2cc0f", width=2)
-                    if bx == 0 and by >= RW and ty % 2 == 0:
-                        cv.create_line(sx + TS, sy + 4, sx + TS, sy + TS - 4, fill="#f2cc0f", width=2)
+                    col = C_ROAD if (tx + ty) % 2 else C_ROAD_ALT
+                    cv.create_rectangle(sx, sy, sx + TS, sy + TS, fill=col, outline="")
+                    lx, ly = tx % BLK, ty % BLK
+                    if ly == 0 and lx >= 2 and tx % 2 == 0:
+                        cv.create_line(sx + 6, sy + TS, sx + TS - 6, sy + TS,
+                                       fill=C_LANE, width=2)
+                    if lx == 0 and ly >= 2 and ty % 2 == 0:
+                        cv.create_line(sx + TS, sy + 6, sx + TS, sy + TS - 6,
+                                       fill=C_LANE, width=2)
+                else:
+                    cv.create_rectangle(sx, sy, sx + TS, sy + TS, fill=C_WALK, outline="")
+                    cv.create_line(sx, sy + TS, sx + TS, sy + TS, fill=C_WALK_JOINT)
+                    cv.create_line(sx + TS, sy, sx + TS, sy + TS, fill=C_WALK_JOINT)
 
+        # 2) Bloklar: binalar ve parklar
+        bx0 = max(0, int(cam_x // (BLK * TS)) - 1)
+        bx1 = min(NB - 1, int((cam_x + self.w) // (BLK * TS)) + 1)
+        by0 = max(0, int(cam_y // (BLK * TS)) - 1)
+        by1 = min(NB - 1, int((cam_y + self.h) // (BLK * TS)) + 1)
+        for by in range(by0, by1 + 1):
+            for bx in range(bx0, bx1 + 1):
+                self.draw_block(bx, by, self.blocks[(bx, by)])
+
+        # 3) Kayma izleri
+        for x, y, age in self.skids:
+            sx, sy = x - cam_x, y - cam_y
+            cv.create_oval(sx - 2, sy - 2, sx + 2, sy + 2, fill="#14161c", outline="")
+
+        # 4) Paralar
+        for co in self.coins:
+            sx, sy = co["x"] - cam_x, co["y"] - cam_y
+            if -20 < sx < self.w + 20 and -20 < sy < self.h + 20:
+                squash = 0.35 + 0.65 * abs(math.cos(self.t * 3 + co["ph"]))
+                r = 6
+                cv.create_oval(sx - r * squash, sy - r, sx + r * squash, sy + r,
+                               fill=C_YELLOW, outline="#b8860b")
+
+        # 5) Arabalar
         for c in self.cars:
             self.draw_car(c)
+        if self.car is not None:
+            self.draw_car(self.car)
 
+        # 6) İnsanlar
         for p in self.peds:
             sx, sy = p["x"] - cam_x, p["y"] - cam_y
-            if -10 < sx < self.w + 10 and -10 < sy < self.h + 10:
-                cv.create_oval(sx - 6, sy - 6, sx + 6, sy + 6, fill=p["col"], outline="#111")
+            if -20 < sx < self.w + 20 and -20 < sy < self.h + 20:
+                bob = math.sin(self.t * 9 + p["ph"]) * 0.8 if p["sp"] > 0 else 0.0
+                self.draw_person(sx, sy, p["a"], p["shirt"], p["skin"], bob)
 
+        if self.down_t <= 0 and self.car is None:
+            sx, sy = self.px - cam_x, self.py - cam_y
+            bob = math.sin(self.walk_t * 12) * 1.2 if self.walking else 0.0
+            self.draw_person(sx, sy, self.pa, "#ff7b54", "#f1c27d", bob, big=True)
+            ex, ey = local_pt(sx, sy, self.pa, 8, 0)
+            cv.create_line(ex, ey, ex + math.cos(self.pa) * 9, ey + math.sin(self.pa) * 9,
+                           fill="#2b2b2b", width=3)
+
+        # 7) Mermiler
         for b in self.bullets:
             sx, sy = b["x"] - cam_x, b["y"] - cam_y
-            col = "#ffe066" if b["by"] == "p" else "#ff4d4d"
-            cv.create_oval(sx - 3, sy - 3, sx + 3, sy + 3, fill=col, outline="")
+            if b["by"] == "p":
+                col = "#fff3a0"
+            else:
+                col = "#ff5252"
+            tail_x = sx - b["dx"] * 0.03
+            tail_y = sy - b["dy"] * 0.03
+            cv.create_line(tail_x, tail_y, sx, sy, fill=col, width=2)
 
+        # 8) Parçacıklar
         for p in self.parts:
             sx, sy = p["x"] - cam_x, p["y"] - cam_y
-            cv.create_rectangle(sx - 2, sy - 2, sx + 2, sy + 2, fill=p["col"], outline="")
-
-        if self.down_t <= 0:
-            if self.car is None:
-                sx, sy = self.px - cam_x, self.py - cam_y
-                cv.create_line(sx, sy, sx + math.cos(self.pa) * 16, sy + math.sin(self.pa) * 16,
-                               fill="#ffffff", width=3)
-                cv.create_oval(sx - 8, sy - 8, sx + 8, sy + 8, fill="#ffd166", outline="#000",
-                               width=2)
+            r = p["r"] * clamp(p["life"] / 0.8, 0.3, 1.0)
+            cv.create_oval(sx - r, sy - r, sx + r, sy + r, fill=p["col"], outline="")
 
         self.draw_mission()
         self.draw_hud()
+
+    def draw_block(self, bx, by, info):
+        cv = self.cv
+        cam_x, cam_y = self.cam_x, self.cam_y
+        x0 = (bx * BLK + 3) * TS - cam_x
+        x1 = (bx * BLK + 9) * TS - cam_x
+        y0 = (by * BLK + 3) * TS - cam_y
+        y1 = (by * BLK + 9) * TS - cam_y
+        s = info["seed"]
+        if info["kind"] == BLDG:
+            cv.create_rectangle(x0 + 6, y0 + 8, x1 + 6, y1 + 8, fill=C_BLD_SHADOW, outline="")
+            cv.create_rectangle(x0, y0, x1, y1, fill=shade(info["wall"], 0.7), outline="")
+            cv.create_rectangle(x0 + 4, y0 + 4, x1 - 4, y1 - 4, fill=info["roof"], outline="")
+            cv.create_line(x0 + 4, y1 - 4, x1 - 4, y1 - 4, fill=shade(info["roof"], 0.7), width=3)
+            cv.create_line(x1 - 4, y0 + 4, x1 - 4, y1 - 4, fill=shade(info["roof"], 0.7), width=3)
+            for i in range(3):
+                bxp = x0 + 24 + ((s * (i + 3) * 17) % 5) * 36
+                byp = y0 + 24 + ((s * (i + 7) * 13) % 5) * 36
+                cv.create_rectangle(bxp, byp, bxp + 18, byp + 12,
+                                    fill=shade(info["roof"], 0.75),
+                                    outline=shade(info["roof"], 0.55))
+        else:
+            cv.create_rectangle(x0, y0, x1, y1, fill=C_GRASS, outline="")
+            cv.create_rectangle(x0 + 8, y0 + 8, x1 - 8, y1 - 8, fill=C_GRASS_ALT, outline="")
+            mx = (x0 + x1) / 2
+            my = (y0 + y1) / 2
+            cv.create_rectangle(mx - 4, y0 + 8, mx + 4, y1 - 8, fill=C_PATH, outline="")
+            cv.create_rectangle(x0 + 8, my - 4, x1 - 8, my + 4, fill=C_PATH, outline="")
+            for i in range(5):
+                tx = x0 + 28 + ((s * (i + 2) * 37) % 180)
+                ty = y0 + 28 + ((s * (i + 5) * 53) % 180)
+                r = 13 + (i % 3) * 3
+                cv.create_oval(tx - r + 5, ty - r + 6, tx + r + 5, ty + r + 6,
+                               fill=C_SHADOW, outline="")
+                cv.create_oval(tx - r, ty - r, tx + r, ty + r, fill=C_TREE,
+                               outline=shade(C_TREE, 0.7))
+                cv.create_oval(tx - r * 0.55, ty - r * 0.6, tx + r * 0.15, ty + r * 0.05,
+                               fill=C_TREE_HI, outline="")
 
     def draw_car(self, c):
         cv = self.cv
@@ -622,78 +798,153 @@ class Game:
         if sx < -60 or sx > self.w + 60 or sy < -60 or sy > self.h + 60:
             return
         a = c["a"]
-        cv.create_polygon(rot_rect(sx, sy, a, 18, 10), fill=c["col"], outline="#000")
-        cv.create_polygon(rot_rect(sx + math.cos(a) * 5, sy + math.sin(a) * 5, a, 6, 7),
-                          fill="#9bd3ff", outline="")
+        L, W = 20, 11
+        col = c["col"]
+        cv.create_oval(sx - L - 1, sy - W + 3, sx + L + 4, sy + W + 6, fill=C_SHADOW, outline="")
+        cv.create_polygon(rot_rect(sx, sy, a, L, W), fill=col, outline=shade(col, 0.55))
+        rx, ry = local_pt(sx, sy, a, -2, 0)
+        cv.create_polygon(rot_rect(rx, ry, a, L * 0.5, W * 0.78),
+                          fill=shade(col, 1.15), outline="")
+        fx, fy = local_pt(sx, sy, a, 7, 0)
+        cv.create_polygon(rot_rect(fx, fy, a, 4, W * 0.6), fill="#8fc7f0", outline="")
+        bxr, byr = local_pt(sx, sy, a, -8, 0)
+        cv.create_polygon(rot_rect(bxr, byr, a, 3, W * 0.55), fill="#6aa7d4", outline="")
+        for side in (-1, 1):
+            hx, hy = local_pt(sx, sy, a, L - 2, side * (W - 3))
+            cv.create_oval(hx - 2.5, hy - 2.5, hx + 2.5, hy + 2.5, fill="#fff7c2", outline="")
+            tlx, tly = local_pt(sx, sy, a, -L + 1, side * (W - 3))
+            tcol = "#ff3b3b" if c.get("brake") else "#7a1010"
+            cv.create_oval(tlx - 2, tly - 2, tlx + 2, tly + 2, fill=tcol, outline="")
         if c["kind"] == "police":
             lc = "#ff2a2a" if int(self.t * 8) % 2 else "#2a7bff"
-            cv.create_rectangle(sx - 3, sy - 3, sx + 3, sy + 3, fill=lc, outline="")
-        if c["kind"] == "mine":
-            cv.create_oval(sx - 3, sy - 3, sx + 3, sy + 3, fill="#22d3ee", outline="")
+            lc2 = "#2a7bff" if lc == "#ff2a2a" else "#ff2a2a"
+            lx, ly = local_pt(sx, sy, a, 0, 4)
+            rx2, ry2 = local_pt(sx, sy, a, 0, -4)
+            cv.create_rectangle(lx - 3, ly - 3, lx + 3, ly + 3, fill=lc, outline="")
+            cv.create_rectangle(rx2 - 3, ry2 - 3, rx2 + 3, ry2 + 3, fill=lc2, outline="")
+
+    def draw_person(self, sx, sy, a, shirt, skin, bob=0.0, big=False):
+        cv = self.cv
+        r = 8 if big else 6
+        cv.create_oval(sx - r - 2, sy - r / 2 + 3, sx + r + 2, sy + r / 2 + 5,
+                       fill=C_SHADOW, outline="")
+        by = sy + bob
+        cv.create_oval(sx - r, by - r, sx + r, by + r, fill=shirt,
+                       outline=shade(shirt, 0.55))
+        hx, hy = sx + math.cos(a) * r * 0.2, by + math.sin(a) * r * 0.2
+        hr = r * 0.55
+        cv.create_oval(hx - hr, hy - hr, hx + hr, hy + hr, fill=skin, outline="")
 
     def draw_mission(self):
         cv = self.cv
         mx, my = self.mission
         sx, sy = mx - self.cam_x, my - self.cam_y
         if 0 <= sx <= self.w and 0 <= sy <= self.h:
-            r = 16 + 4 * math.sin(self.t * 6)
-            cv.create_oval(sx - r, sy - r, sx + r, sy + r, outline="#ffd60a", width=3)
-            cv.create_oval(sx - 4, sy - 4, sx + 4, sy + 4, fill="#ffd60a", outline="")
+            r = 18 + 4 * math.sin(self.t * 6)
+            cv.create_oval(sx - r, sy - r, sx + r, sy + r, outline=C_YELLOW, width=3)
+            cv.create_oval(sx - 5, sy - 5, sx + 5, sy + 5, fill=C_YELLOW, outline="")
         else:
             dx, dy = sx - self.w / 2, sy - self.h / 2
             n = math.hypot(dx, dy) or 1.0
-            edge = min(self.w, self.h) / 2 - 60
+            edge = min(self.w, self.h) / 2 - 70
             ex, ey = self.w / 2 + dx / n * edge, self.h / 2 + dy / n * edge
-            cv.create_oval(ex - 9, ey - 9, ex + 9, ey + 9, fill="#ffd60a", outline="#000")
+            ang = math.atan2(dy, dx)
+            tip = (ex + math.cos(ang) * 14, ey + math.sin(ang) * 14)
+            left = (ex + math.cos(ang + 2.5) * 10, ey + math.sin(ang + 2.5) * 10)
+            right = (ex + math.cos(ang - 2.5) * 10, ey + math.sin(ang - 2.5) * 10)
+            cv.create_polygon(tip[0], tip[1], left[0], left[1], right[0], right[1],
+                              fill=C_YELLOW, outline="#000000")
+
+    def panel(self, x0, y0, x1, y1):
+        self.cv.create_rectangle(x0 + 2, y0 + 3, x1 + 2, y1 + 3, fill="#07090d", outline="")
+        self.cv.create_rectangle(x0, y0, x1, y1, fill=C_HUD, outline=C_HUD_EDGE, width=1)
 
     def draw_hud(self):
         cv = self.cv
         w, h = self.w, self.h
-        cv.create_rectangle(16, 16, 216, 34, fill="#000000", outline="#ffffff")
-        cv.create_rectangle(18, 18, 18 + 196 * self.hp / 100, 32, fill="#e63946", outline="")
-        cv.create_text(16, 50, anchor="w", text="$ %d" % self.cash, fill=STAR_C,
-                       font=("Consolas", 18, "bold"))
-        stars = "★" * self.wanted + "☆" * (MAX_WANTED - self.wanted)
-        cv.create_text(16, 84, anchor="w", text="ARANIYOR " + stars, fill="#ff5c8a",
-                       font=("Consolas", 13, "bold"))
-        cv.create_text(w / 2, 22, text="GÖREV: işaretli yere git  |  ödül $%d" % self.mission_reward,
-                       fill="#ffd60a", font=("Consolas", 12, "bold"))
+
+        # Sol üst: can, para, arama
+        self.panel(14, 14, 262, 140)
+        cv.create_text(28, 30, anchor="w", text="CAN", fill=C_MUTED, font=("Segoe UI", 9, "bold"))
+        cv.create_rectangle(28, 42, 248, 54, fill="#1a1f2a", outline="")
+        frac = clamp(self.hp / 100, 0, 1)
+        hc = "#2ecc71" if frac > 0.5 else "#f1c40f" if frac > 0.25 else "#e74c3c"
+        cv.create_rectangle(28, 42, 28 + 220 * frac, 54, fill=hc, outline="")
+        money = "{:,}".format(self.cash).replace(",", ".")
+        cv.create_text(29, 74, anchor="w", text="$ " + money, fill="#000000",
+                       font=("Segoe UI", 19, "bold"))
+        cv.create_text(28, 73, anchor="w", text="$ " + money, fill=C_YELLOW,
+                       font=("Segoe UI", 19, "bold"))
+        stars = "\u2605" * self.wanted + "\u2606" * (MAX_WANTED - self.wanted)
+        cv.create_text(28, 116, anchor="w", text="ARANIYOR", fill=C_MUTED,
+                       font=("Segoe UI", 9, "bold"))
+        cv.create_text(120, 116, anchor="w", text=stars, fill="#ff5c8a", font=("Segoe UI", 13))
+
+        # Üst orta: görev ve mesaj
+        self.panel(w / 2 - 230, 14, w / 2 + 230, 58)
+        cv.create_text(w / 2, 28, text="GÖREV", fill=C_MUTED, font=("Segoe UI", 8, "bold"))
+        cv.create_text(w / 2, 46,
+                       text="İşaretli yere git  •  ödül $%d" % self.mission_reward,
+                       fill=C_YELLOW, font=("Segoe UI", 11, "bold"))
         if self.msg_t > 0:
-            cv.create_text(w / 2, 56, text=self.msg, fill="#ffffff", font=("Consolas", 16, "bold"))
+            cv.create_text(w / 2 + 1, 81, text=self.msg, fill="#000000",
+                           font=("Segoe UI", 15, "bold"))
+            cv.create_text(w / 2, 80, text=self.msg, fill=C_TEXT,
+                           font=("Segoe UI", 15, "bold"))
+
+        # Araç hızı
         if self.car is not None:
-            cv.create_text(16, 110, anchor="w", text="HIZ %d km/s  |  ARAÇ %d%%" %
-                           (abs(self.car["v"]) * 0.5, max(0, self.car["hp"] / 6 * 100)),
-                           fill="#22d3ee", font=("Consolas", 12))
+            kmh = int(abs(self.car["v"]) * 0.5)
+            self.panel(14, 152, 262, 202)
+            cv.create_text(28, 168, anchor="w", text="ARAÇ", fill=C_MUTED,
+                           font=("Segoe UI", 9, "bold"))
+            cv.create_text(248, 168, anchor="e", text="%d km/s" % kmh, fill="#22d3ee",
+                           font=("Segoe UI", 11, "bold"))
+            cv.create_rectangle(28, 182, 248, 190, fill="#1a1f2a", outline="")
+            cv.create_rectangle(28, 182, 28 + 220 * clamp(abs(self.car["v"]) / 470, 0, 1), 190,
+                                fill="#22d3ee", outline="")
+
+        # Ölüm yazısı
         if self.down_t > 0:
-            cv.create_text(w / 2, h / 2, text="WASTED", fill="#ff2a2a",
-                           font=("Consolas", 48, "bold"))
-        cv.create_text(16, h - 16, anchor="sw",
-                       text="%d FPS" % self.fps, fill="#7dffb3", font=("Consolas", 10))
-        cv.create_text(w / 2, h - 16,
-                       text="WASD hareket | Fare nişan, sol tık / Boşluk ateş | E araca bin/in | "
-                            "Shift koş | ESC çık",
-                       fill="#c9a8ff", font=("Consolas", 10))
-        mx0, my0 = w - 196, h - 196
+            cv.create_text(w / 2 + 3, h / 2 + 3, text="WASTED", fill="#000000",
+                           font=("Segoe UI", 54, "bold"))
+            cv.create_text(w / 2, h / 2, text="WASTED", fill="#ff3b3b",
+                           font=("Segoe UI", 54, "bold"))
+
+        # Alt: kontroller ve FPS
+        self.panel(14, h - 58, 780, h - 14)
+        cv.create_text(28, h - 36, anchor="w", fill=C_MUTED, font=("Segoe UI", 10),
+                       text="WASD hareket  •  Fare nişan  •  Sol tık / Boşluk ateş  •  "
+                            "E araç  •  Shift koş  •  ESC çık")
+        cv.create_text(w - 14, h - 14, anchor="se", text="%d FPS" % self.fps,
+                       fill="#7dffb3", font=("Consolas", 9))
+
+        # Mini harita
+        mx0, my0 = w - 200, h - 200
+        self.panel(mx0 - 10, my0 - 10, mx0 + 190, my0 + 190)
         cv.create_image(mx0, my0, anchor="nw", image=self.mini)
-        cv.create_rectangle(mx0 - 2, my0 - 2, mx0 + 180, my0 + 180, outline="#ffffff")
         px = mx0 + self.px / TS * 2
         py = my0 + self.py / TS * 2
-        cv.create_oval(px - 3, py - 3, px + 3, py + 3, fill="#ffffff", outline="")
+        cv.create_oval(px - 4, py - 4, px + 4, py + 4, fill="#ffffff", outline="#000000")
         mxm = mx0 + self.mission[0] / TS * 2
         mym = my0 + self.mission[1] / TS * 2
-        cv.create_oval(mxm - 3, mym - 3, mxm + 3, mym + 3, fill="#ffd60a", outline="")
+        cv.create_oval(mxm - 4, mym - 4, mxm + 4, mym + 4, fill=C_YELLOW, outline="#000000")
 
-    # ---------- Döngü ----------
+    # ----- döngü -----
     def loop(self):
         if self.dead:
             return
+        now = time.perf_counter()
+        dt = min(0.05, now - self.last)
+        self.last = now
         try:
-            now = time.perf_counter()
-            dt = min(0.05, now - self.last)
-            self.last = now
             self.update(dt)
             self.render()
         except tk.TclError:
+            return                      # pencere kapandıysa çık
+        except Exception:
+            import traceback
+            traceback.print_exc()       # hatayı launcher logunda görünür yap
             return
         self.fps = self.fps * 0.9 + (1.0 / max(dt, 1e-3)) * 0.1
         self.win.after(16, self.loop)
