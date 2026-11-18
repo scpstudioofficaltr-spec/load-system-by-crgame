@@ -1,5 +1,7 @@
 import tkinter as tk
 import threading
+import queue
+import time
 import urllib.request
 
 WHITE = "#ffffff"
@@ -9,40 +11,47 @@ GREY = "#666666"
 LIGHT = "#f6f6f6"
 LINE = "#e5e5e5"
 
-LIST_URL = ("https://raw.githubusercontent.com/scpstudioofficaltr-spec/"
-            "load-system-by-crgame/refs/heads/main/game/list")
+BASE = "https://raw.githubusercontent.com/scpstudioofficaltr-spec/load-system-by-crgame/refs/heads/main/"
+LIST_URLS = [BASE + "game/list", BASE + "oyun/list"]   # sırayla denenir
 
-# Liste alınamazsa ya da boşsa gösterilecek örnek oyun
-FALLBACK = [{"name": "Örnek Oyun",
-             "file": "ornek_oyun.py",
-             "desc": "Bu bir örnek oyundur. Gerçek oyunlar GitHub listesinden gelecek."}]
+FALLBACK = [{"name": "Örnek Oyun", "file": "ornek_oyun.py", "url": None,
+             "desc": "Liste alınamadı. Bu bir örnek oyundur."}]
+
+
+def fetch_bytes(url, timeout=15):
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read()
+
+
+def parse_line(line):
+    """isim | açıklama | url   (açıklama ve url isteğe bağlı)"""
+    parts = [p.strip() for p in line.split("|")]
+    url = None
+    if len(parts) > 1 and parts[-1].lower().startswith("http"):
+        url = parts.pop()
+    name = parts[0]
+    if name.lower().endswith(".py"):
+        name = name[:-3]
+    desc = parts[1] if len(parts) > 1 and parts[1] else "Bu oyun için henüz açıklama eklenmedi."
+    return {"name": name, "file": name.replace(" ", "_").lower() + ".py",
+            "url": url, "desc": desc}
 
 
 def fetch_games():
-    """GitHub'daki list dosyasından oyunları çeker.
-    Satır formatı:  isim   veya   isim | açıklama"""
-    try:
-        req = urllib.request.Request(LIST_URL, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=8) as r:
-            text = r.read().decode("utf-8", errors="ignore")
-    except Exception:
-        return FALLBACK
-
-    games = []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
+    for base in LIST_URLS:
+        try:
+            text = fetch_bytes(base + "?t=" + str(int(time.time())), 8).decode("utf-8", errors="ignore")
+        except Exception:
             continue
-        if "|" in line:
-            name, desc = [p.strip() for p in line.split("|", 1)]
-        else:
-            name, desc = line, "Bu oyun için henüz açıklama eklenmedi."
-        if name.lower().endswith(".py"):
-            name = name[:-3]
-        games.append({"name": name,
-                      "file": name.replace(" ", "_").lower() + ".py",
-                      "desc": desc})
-    return games or FALLBACK
+        games = []
+        for line in text.splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                games.append(parse_line(line))
+        if games:
+            return games
+    return FALLBACK
 
 
 def build(root):
@@ -52,6 +61,30 @@ def build(root):
         w.destroy()
 
     state = {"anim": None, "games": None}
+    q = queue.Queue()
+
+    def poll():
+        try:
+            while True:
+                cb, res = q.get_nowait()
+                cb(res)
+        except queue.Empty:
+            pass
+        except tk.TclError:
+            return
+        try:
+            root.after(80, poll)
+        except tk.TclError:
+            pass
+
+    def bg(fn, cb):
+        def work():
+            try:
+                res = fn()
+            except Exception as e:
+                res = e
+            q.put((cb, res))
+        threading.Thread(target=work, daemon=True).start()
 
     # ---------- Üst menü ----------
     nav = tk.Frame(root, bg=WHITE, highlightbackground=LINE, highlightthickness=1)
@@ -105,9 +138,12 @@ def build(root):
         status.pack(pady=10)
 
         def fill(games):
-            if not grid.winfo_exists():
+            try:
+                if not grid.winfo_exists():
+                    return
+                status.destroy()
+            except tk.TclError:
                 return
-            status.destroy()
             state["games"] = games
             cols = 3
             for i, g in enumerate(games):
@@ -125,14 +161,10 @@ def build(root):
                 for w in (card, t, f):
                     w.bind("<Button-1>", lambda e, g=g: show_loading(g))
 
-        def worker():
-            games = fetch_games()
-            root.after(0, lambda: fill(games))
-
         if state["games"] is not None:
             fill(state["games"])
         else:
-            threading.Thread(target=worker, daemon=True).start()
+            bg(fetch_games, lambda res: fill(FALLBACK if isinstance(res, Exception) else res))
 
     # ---------- YÜKLEME ANİMASYONU ----------
     def show_loading(game):
@@ -152,7 +184,7 @@ def build(root):
         def spin():
             ticks["n"] += 1
             c.itemconfigure(arc, start=(ticks["n"] * 12) % 360)
-            if ticks["n"] >= 60:          # ~2 saniye
+            if ticks["n"] >= 60:
                 show_game(game)
                 return
             state["anim"] = root.after(33, spin)
@@ -160,6 +192,30 @@ def build(root):
         spin()
 
     # ---------- OYUN SAYFASI ----------
+    def launch(game, btn, msg):
+        if not game.get("url"):
+            msg.config(text="Bu oyun için listede bağlantı (url) yok.", fg=RED)
+            return
+        btn.config(text="Yükleniyor...", state="disabled")
+        msg.config(text="", fg=GREY)
+
+        def done(res):
+            try:
+                btn.config(text="Play", state="normal")
+            except tk.TclError:
+                return
+            if isinstance(res, Exception):
+                msg.config(text="Oyun indirilemedi: " + str(res)[:120], fg=RED)
+                return
+            try:
+                ns = {"__name__": "game"}
+                exec(compile(res.decode("utf-8"), game["file"], "exec"), ns)
+                ns["play"](root)
+            except Exception as e:
+                msg.config(text="Oyun hatası: " + str(e)[:150], fg=RED)
+
+        bg(lambda: fetch_bytes(game["url"]), done)
+
     def show_game(game):
         clear()
         box = tk.Frame(page, bg=WHITE)
@@ -170,10 +226,14 @@ def build(root):
                  font=("Consolas", 11)).pack(anchor="w", pady=(4, 0))
         tk.Label(box, text=game["desc"], fg=GREY, bg=WHITE, font=("Segoe UI", 13),
                  wraplength=800, justify="left").pack(anchor="w", pady=(20, 28))
-        tk.Button(box, text="Play", fg=WHITE, bg=RED, activebackground="#b80500",
-                  activeforeground=WHITE, relief="flat", font=("Segoe UI", 13, "bold"),
-                  padx=36, pady=12, cursor="hand2",
-                  command=lambda: None).pack(anchor="w")   # şimdilik bir şey yapmıyor
+        play_btn = tk.Button(box, text="Play", fg=WHITE, bg=RED, activebackground="#b80500",
+                             activeforeground=WHITE, relief="flat",
+                             font=("Segoe UI", 13, "bold"), padx=36, pady=12, cursor="hand2")
+        play_btn.pack(anchor="w")
+        msg = tk.Label(box, text="", fg=GREY, bg=WHITE, font=("Segoe UI", 11),
+                       wraplength=800, justify="left")
+        msg.pack(anchor="w", pady=(12, 0))
+        play_btn.config(command=lambda: launch(game, play_btn, msg))
         tk.Button(box, text="← Geri", fg=DARK, bg=WHITE, relief="flat",
                   font=("Segoe UI", 11), cursor="hand2",
                   command=show_home).pack(anchor="w", pady=(20, 0))
@@ -186,4 +246,5 @@ def build(root):
     tk.Label(footer, text="© LOAD SYSTEM", fg=GREY, bg=LIGHT,
              font=("Segoe UI", 10)).pack(pady=12)
 
-    show_home()   # program açılınca ilk ana menü gelir
+    poll()
+    show_home()
