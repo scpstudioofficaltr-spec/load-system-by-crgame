@@ -1,0 +1,703 @@
+import math
+import random
+import time
+import tkinter as tk
+
+TITLE = "SAN NOVA"
+TS = 40                 # bir karonun piksel boyutu
+MW = MH = 90            # harita boyutu (karo)
+BLK = 10                # bir blok boyutu (karo)
+RW = 2                  # yol genişliği (karo)
+ROAD, SIDE, BLDG, PARK = 0, 1, 2, 3
+MAX_WANTED = 5
+POLICE_C = "#1e3a8a"
+ROAD_C, SIDE_C, PARK_C = "#33373f", "#8c8c8c", "#2d6a4f"
+BLDG_COLS = ["#5b6573", "#7a5c4a", "#4f6b5c", "#8a8152", "#6a4f7a", "#3f4c63", "#9c6b4e"]
+CAR_COLS = ["#d62828", "#1d4ed8", "#f5f5f5", "#111111", "#f4a261", "#2a9d8f", "#7209b7"]
+PED_COLS = ["#e9c46a", "#264653", "#e76f51", "#a8dadc", "#ffffff", "#8d99ae"]
+PART_COLS = ["#ff7b00", "#ffd166", "#ff3d3d", "#444444"]
+STAR_C = "#ffd60a"
+
+
+def clamp(v, lo, hi):
+    return lo if v < lo else hi if v > hi else v
+
+
+def angdiff(a, b):
+    return (b - a + math.pi) % (2 * math.pi) - math.pi
+
+
+def rot_rect(cx, cy, a, L, W):
+    c, s = math.cos(a), math.sin(a)
+    out = []
+    for lx, ly in ((L, W), (L, -W), (-L, -W), (-L, W)):
+        out.append(cx + lx * c - ly * s)
+        out.append(cy + lx * s + ly * c)
+    return out
+
+
+def gen_city(rnd):
+    tiles = [[ROAD] * MW for _ in range(MH)]
+    cols = [[ROAD_C] * MW for _ in range(MH)]
+    blocks = {}
+    for ty in range(MH):
+        for tx in range(MW):
+            bx, by = tx % BLK, ty % BLK
+            if bx < RW or by < RW:
+                continue                      # yol
+            if bx == RW or by == RW:
+                tiles[ty][tx] = SIDE          # kaldırım
+                cols[ty][tx] = SIDE_C
+                continue
+            key = (tx // BLK, ty // BLK)
+            if key not in blocks:
+                if rnd.random() < 0.78:
+                    blocks[key] = (BLDG, rnd.choice(BLDG_COLS))
+                else:
+                    blocks[key] = (PARK, PARK_C)
+            t, c = blocks[key]
+            tiles[ty][tx] = t
+            cols[ty][tx] = c
+    return tiles, cols
+
+
+def build_minimap(master, cols):
+    img = tk.PhotoImage(master=master, width=MW, height=MH)
+    rows = ["{" + " ".join(cols[ty]) + "}" for ty in range(MH)]
+    img.put(" ".join(rows), to=(0, 0))
+    return img.zoom(2, 2)
+
+
+class Game:
+    def __init__(self, parent):
+        self.win = tk.Toplevel(parent)
+        self.win.title(TITLE + " - GTA")
+        self.win.configure(bg="black")
+        try:
+            self.win.state("zoomed")
+        except tk.TclError:
+            self.win.geometry("1200x750")
+        self.cv = tk.Canvas(self.win, bg="#222222", highlightthickness=0)
+        self.cv.pack(fill="both", expand=True)
+
+        self.rnd = random.Random(2024)
+        self.tiles, self.cols = gen_city(self.rnd)
+        self.mini = build_minimap(self.win, self.cols)
+
+        self.keys = set()
+        self.mx, self.my = 400, 300
+        self.firing = False
+        self.dead = False
+        self.t = 0.0
+        self.fps = 60.0
+        self.last = time.perf_counter()
+        self.w, self.h = 1000, 700
+        self.cam_x = self.cam_y = 0.0
+
+        self.px, self.py = self.free_point(road=True)
+        self.pa = 0.0
+        self.hp = 100.0
+        self.cash = 500
+        self.wanted = 0
+        self.heat = 0.0
+        self.cool = 0.0
+        self.shot_t = -10.0
+        self.police_t = 0.0
+        self.down_t = 0.0
+        self.car = None
+        self.msg = "San Nova'ya hoş geldin"
+        self.msg_t = 4.0
+        self.bullets = []
+        self.parts = []
+
+        self.cars = [self.new_traffic() for _ in range(40)]
+        self.cars += [self.new_parked() for _ in range(22)]
+        self.peds = [self.new_ped() for _ in range(70)]
+        self.mission = None
+        self.mission_reward = 0
+        self.new_mission()
+
+        self.cv.bind("<Motion>", self.on_motion)
+        self.cv.bind("<ButtonPress-1>", lambda e: setattr(self, "firing", True))
+        self.cv.bind("<ButtonRelease-1>", lambda e: setattr(self, "firing", False))
+        w = self.win
+        w.bind("<KeyPress>", self.on_down)
+        w.bind("<KeyRelease>", self.on_up)
+        w.protocol("WM_DELETE_WINDOW", self.close)
+        w.focus_force()
+        self.loop()
+
+    # ---------- Yardımcılar ----------
+    def say(self, text, t=3.0):
+        self.msg = text
+        self.msg_t = t
+
+    def free_point(self, road=False):
+        while True:
+            tx = self.rnd.randrange(MW)
+            ty = self.rnd.randrange(MH)
+            t = self.tiles[ty][tx]
+            if t == BLDG or (road and t != ROAD):
+                continue
+            return (tx + 0.5) * TS, (ty + 0.5) * TS
+
+    def solid(self, x, y):
+        tx, ty = int(x // TS), int(y // TS)
+        if tx < 0 or ty < 0 or tx >= MW or ty >= MH:
+            return True
+        return self.tiles[ty][tx] == BLDG
+
+    def blocked(self, x, y, r):
+        return (self.solid(x - r, y - r) or self.solid(x + r, y - r) or
+                self.solid(x - r, y + r) or self.solid(x + r, y + r))
+
+    def move(self, x, y, dx, dy, r):
+        if not self.blocked(x + dx, y, r):
+            x += dx
+        if not self.blocked(x, y + dy, r):
+            y += dy
+        return x, y
+
+    def drive(self, c, dt, r=12):
+        nx = c["x"] + math.cos(c["a"]) * c["v"] * dt
+        ny = c["y"] + math.sin(c["a"]) * c["v"] * dt
+        if self.blocked(nx, ny, r):
+            c["v"] *= -0.2
+            return False
+        c["x"], c["y"] = nx, ny
+        return True
+
+    def explode(self, x, y, n):
+        for _ in range(n):
+            a = self.rnd.uniform(0, math.tau)
+            s = self.rnd.uniform(60, 260)
+            self.parts.append({"x": x, "y": y, "dx": math.cos(a) * s, "dy": math.sin(a) * s,
+                               "life": self.rnd.uniform(0.3, 0.8),
+                               "col": self.rnd.choice(PART_COLS)})
+
+    # ---------- Oluşturma ----------
+    def new_traffic(self):
+        r = self.rnd
+        if r.random() < 0.5:
+            base = r.randrange(0, MH // BLK) * BLK
+            lane = r.choice((0.5, 1.5))
+            y = (base + lane) * TS
+            x = r.uniform(0, MW * TS)
+            a = 0.0 if lane == 0.5 else math.pi
+        else:
+            base = r.randrange(0, MW // BLK) * BLK
+            lane = r.choice((0.5, 1.5))
+            x = (base + lane) * TS
+            y = r.uniform(0, MH * TS)
+            a = math.pi / 2 if lane == 0.5 else -math.pi / 2
+        return {"kind": "traffic", "x": x, "y": y, "a": a, "v": r.uniform(90, 150),
+                "col": r.choice(CAR_COLS), "hp": 3.0, "cool": 0.0}
+
+    def new_parked(self):
+        c = self.new_traffic()
+        c["kind"] = "parked"
+        c["v"] = 0.0
+        c["hp"] = 2.0
+        return c
+
+    def new_ped(self):
+        x, y = self.free_point()
+        return {"x": x, "y": y, "a": self.rnd.uniform(0, math.tau),
+                "t": self.rnd.uniform(1, 3), "col": self.rnd.choice(PED_COLS),
+                "sp": self.rnd.uniform(35, 60), "dead": False}
+
+    def new_mission(self):
+        self.mission = self.free_point()
+        self.mission_reward = self.rnd.randrange(300, 1250, 50)
+
+    # ---------- Girdi ----------
+    def on_down(self, e):
+        k = e.keysym.lower()
+        if k == "escape":
+            self.close()
+            return
+        if k not in self.keys and k == "e" and self.down_t <= 0:
+            self.toggle_car()
+        self.keys.add(k)
+
+    def on_up(self, e):
+        self.keys.discard(e.keysym.lower())
+
+    def on_motion(self, e):
+        self.mx, self.my = e.x, e.y
+
+    def close(self):
+        self.dead = True
+        try:
+            self.win.destroy()
+        except tk.TclError:
+            pass
+
+    # ---------- Araç binme/inme ----------
+    def toggle_car(self):
+        if self.car is not None:
+            c = self.car
+            self.leave_car()
+            a = c["a"] + math.pi / 2
+            nx, ny = self.px + math.cos(a) * 30, self.py + math.sin(a) * 30
+            if not self.blocked(nx, ny, 8):
+                self.px, self.py = nx, ny
+            self.say("Araçtan indin")
+            return
+        best, bd = None, 48
+        for c in self.cars:
+            if c["kind"] != "parked" or abs(c["v"]) > 15:
+                continue
+            d = math.hypot(c["x"] - self.px, c["y"] - self.py)
+            if d < bd:
+                best, bd = c, d
+        if best is not None:
+            self.cars.remove(best)
+            best["kind"] = "mine"
+            best["hp"] = max(best["hp"], 6.0)
+            self.car = best
+            self.say("Araca bindin - W/S gaz/fren, A/D yönlendir")
+
+    def leave_car(self):
+        if self.car is not None:
+            c = self.car
+            c["kind"] = "parked"
+            c["v"] = 0.0
+            self.cars.append(c)
+            self.car = None
+
+    # ---------- Güncelleme ----------
+    def update(self, dt):
+        self.t += dt
+        if self.msg_t > 0:
+            self.msg_t -= dt
+        self.cam_x = self.px - self.w / 2
+        self.cam_y = self.py - self.h / 2
+        if self.down_t > 0:
+            self.down_t -= dt
+            if self.down_t <= 0:
+                self.respawn()
+            self.update_world(dt)
+            self.update_fx(dt)
+            return
+        self.update_player(dt)
+        self.update_world(dt)
+        self.update_fx(dt)
+
+    def update_player(self, dt):
+        k = self.keys
+        sprint = "shift_l" in k or "shift_r" in k
+        if self.car is None:
+            dx = (1 if "d" in k else 0) - (1 if "a" in k else 0)
+            dy = (1 if "s" in k else 0) - (1 if "w" in k else 0)
+            self.pa = math.atan2(self.my + self.cam_y - self.py, self.mx + self.cam_x - self.px)
+            if dx or dy:
+                n = math.hypot(dx, dy)
+                sp = 150 * (1.9 if sprint else 1.0) * dt
+                self.px, self.py = self.move(self.px, self.py, dx / n * sp, dy / n * sp, 8)
+            self.cool -= dt
+            if (self.firing or "space" in k) and self.cool <= 0:
+                self.cool = 0.16
+                self.fire(self.pa)
+        else:
+            self.drive_player(dt)
+            self.px, self.py = self.car["x"], self.car["y"]
+            self.cool -= dt
+            if (self.firing or "space" in k) and self.cool <= 0:
+                self.cool = 0.3
+                self.fire(self.car["a"])
+
+    def drive_player(self, dt):
+        c = self.car
+        k = self.keys
+        sprint = "shift_l" in k or "shift_r" in k
+        fwd = "w" in k or "up" in k
+        back = "s" in k or "down" in k
+        if fwd:
+            c["v"] += 260 * dt
+        elif back:
+            c["v"] -= (300 if c["v"] > 10 else 120) * dt
+        else:
+            c["v"] *= (1 - 0.6 * dt)
+        c["v"] = clamp(c["v"], -130, 470 if sprint else 330)
+        steer = (1 if ("d" in k or "right" in k) else 0) - (1 if ("a" in k or "left" in k) else 0)
+        if steer and abs(c["v"]) > 3:
+            sign = 1 if c["v"] > 0 else -1
+            c["a"] += steer * sign * 2.4 * dt * min(1.0, abs(c["v"]) / 140)
+        c["v"] *= (1 - 0.1 * dt)
+        v0 = abs(c["v"])
+        if not self.drive(c, dt):
+            if v0 > 100:
+                c["hp"] -= 2
+                self.explode(c["x"], c["y"], 6)
+                self.hurt(3)
+        if c["hp"] <= 0 and self.car is c:
+            self.car_wreck()
+
+    def fire(self, a):
+        self.shot_t = self.t
+        self.bullets.append({"x": self.px + math.cos(a) * 14, "y": self.py + math.sin(a) * 14,
+                             "dx": math.cos(a) * 720, "dy": math.sin(a) * 720,
+                             "life": 0.9, "by": "p"})
+
+    def update_world(self, dt):
+        self.update_cars(dt)
+        self.update_peds(dt)
+        self.update_bullets(dt)
+        self.update_wanted(dt)
+        self.check_mission()
+        self.spawn_stuff(dt)
+
+    def update_cars(self, dt):
+        for c in self.cars:
+            if c["kind"] == "traffic":
+                c["x"] += math.cos(c["a"]) * c["v"] * dt
+                c["y"] += math.sin(c["a"]) * c["v"] * dt
+                if c["x"] < -2 * TS:
+                    c["x"] = (MW + 1) * TS
+                elif c["x"] > (MW + 2) * TS:
+                    c["x"] = -TS
+                if c["y"] < -2 * TS:
+                    c["y"] = (MH + 1) * TS
+                elif c["y"] > (MH + 2) * TS:
+                    c["y"] = -TS
+            elif c["kind"] == "police":
+                self.update_police(c, dt)
+        self.cars = [c for c in self.cars if not c.get("gone")]
+
+        if self.car is not None:
+            c = self.car
+            for o in list(self.cars):
+                d = math.hypot(o["x"] - c["x"], o["y"] - c["y"])
+                if d < 26 and abs(c["v"]) > 60:
+                    o["hp"] -= abs(c["v"]) * dt * 0.06
+                    c["v"] *= 0.7
+                    if o["hp"] <= 0:
+                        self.destroy_car(o)
+
+    def update_police(self, c, dt):
+        dxp = self.px - c["x"]
+        dyp = self.py - c["y"]
+        d = math.hypot(dxp, dyp)
+        if d > 1100 and self.wanted == 0:
+            c["gone"] = True
+            return
+        want = math.atan2(dyp, dxp)
+        c["a"] += clamp(angdiff(c["a"], want), -2.5 * dt, 2.5 * dt)
+        c["v"] = min(c["v"] + 260 * dt, 150 + self.wanted * 15)
+        if not self.drive(c, dt, 14):
+            c["a"] += self.rnd.choice((-1.4, 1.4))
+            c["v"] = 120
+        c["cool"] -= dt
+        if d < 300 and c["cool"] <= 0 and self.down_t <= 0:
+            c["cool"] = self.rnd.uniform(0.9, 1.6)
+            a = want + self.rnd.uniform(-0.12, 0.12)
+            self.bullets.append({"x": c["x"], "y": c["y"], "dx": math.cos(a) * 460,
+                                 "dy": math.sin(a) * 460, "life": 1.2, "by": "e"})
+        if d < 24 and self.down_t <= 0:
+            self.hurt(14 * dt)
+            c["v"] *= 0.5
+
+    def destroy_car(self, o):
+        if o not in self.cars:
+            return
+        self.cars.remove(o)
+        self.explode(o["x"], o["y"], 26)
+        if o["kind"] == "police":
+            self.cash += 250
+            self.say("Polis aracı imha edildi! +$250")
+        else:
+            self.add_wanted(1)
+
+    def car_wreck(self):
+        c = self.car
+        self.explode(c["x"], c["y"], 30)
+        self.car = None
+        self.hurt(60)
+
+    def update_peds(self, dt):
+        for p in self.peds:
+            if p["dead"]:
+                continue
+            p["t"] -= dt
+            if p["t"] <= 0:
+                p["a"] = self.rnd.uniform(0, math.tau)
+                p["t"] = self.rnd.uniform(1.5, 4)
+            fleeing = self.wanted > 0 and math.hypot(p["x"] - self.px, p["y"] - self.py) < 160
+            sp = p["sp"]
+            if fleeing:
+                p["a"] = math.atan2(p["y"] - self.py, p["x"] - self.px)
+                sp = 110
+            nx = p["x"] + math.cos(p["a"]) * sp * dt
+            ny = p["y"] + math.sin(p["a"]) * sp * dt
+            if self.blocked(nx, ny, 6):
+                p["a"] += math.pi
+            else:
+                p["x"], p["y"] = nx, ny
+            if self.car is not None and abs(self.car["v"]) > 70:
+                if math.hypot(p["x"] - self.car["x"], p["y"] - self.car["y"]) < 20:
+                    p["dead"] = True
+                    self.add_wanted(1)
+                    self.explode(p["x"], p["y"], 8)
+        self.peds = [p for p in self.peds if not p["dead"]]
+
+    def update_bullets(self, dt):
+        alive = []
+        for b in self.bullets:
+            b["life"] -= dt
+            b["x"] += b["dx"] * dt
+            b["y"] += b["dy"] * dt
+            if b["life"] <= 0 or self.solid(b["x"], b["y"]):
+                continue
+            hit = False
+            if b["by"] == "p":
+                for p in self.peds:
+                    if math.hypot(p["x"] - b["x"], p["y"] - b["y"]) < 10:
+                        p["dead"] = True
+                        hit = True
+                        self.add_wanted(1)
+                        self.explode(p["x"], p["y"], 8)
+                        break
+                if not hit:
+                    for c in list(self.cars):
+                        if math.hypot(c["x"] - b["x"], c["y"] - b["y"]) < 18:
+                            c["hp"] -= 1
+                            hit = True
+                            if c["hp"] <= 0:
+                                self.destroy_car(c)
+                            break
+            else:
+                if self.down_t <= 0 and math.hypot(self.px - b["x"], self.py - b["y"]) < 14:
+                    hit = True
+                    if self.car is not None:
+                        self.car["hp"] -= 6
+                        self.hurt(3)
+                        if self.car is not None and self.car["hp"] <= 0:
+                            self.car_wreck()
+                    else:
+                        self.hurt(8)
+            if not hit:
+                alive.append(b)
+        self.bullets = alive
+
+    def update_wanted(self, dt):
+        cops_near = any(c["kind"] == "police" and
+                        math.hypot(c["x"] - self.px, c["y"] - self.py) < 420
+                        for c in self.cars)
+        if cops_near or self.t - self.shot_t < 2.5:
+            self.heat = 0.0
+        elif self.wanted > 0:
+            self.heat += dt
+            if self.heat > 10:
+                self.wanted -= 1
+                self.heat = 0.0
+
+    def add_wanted(self, n):
+        self.wanted = min(MAX_WANTED, self.wanted + n)
+        self.heat = 0.0
+
+    def spawn_stuff(self, dt):
+        target = min(6, self.wanted * 2)
+        cops = [c for c in self.cars if c["kind"] == "police"]
+        self.police_t -= dt
+        if len(cops) < target and self.police_t <= 0 and self.down_t <= 0:
+            self.police_t = 2.5
+            a = self.rnd.uniform(0, math.tau)
+            x = self.px + math.cos(a) * 520
+            y = self.py + math.sin(a) * 520
+            if not self.blocked(x, y, 14):
+                self.cars.append({"kind": "police", "x": x, "y": y, "a": a + math.pi,
+                                  "v": 120.0, "col": POLICE_C, "hp": 4.0, "cool": 1.0})
+        if len(self.peds) < 70 and self.rnd.random() < 0.02:
+            self.peds.append(self.new_ped())
+        traffic = sum(1 for c in self.cars if c["kind"] == "traffic")
+        if traffic < 40 and self.rnd.random() < 0.02:
+            self.cars.append(self.new_traffic())
+
+    def check_mission(self):
+        mx, my = self.mission
+        if math.hypot(self.px - mx, self.py - my) < 36:
+            self.cash += self.mission_reward
+            self.say("Görev tamamlandı! +$%d" % self.mission_reward)
+            self.new_mission()
+
+    def update_fx(self, dt):
+        alive = []
+        for p in self.parts:
+            p["life"] -= dt
+            if p["life"] > 0:
+                p["x"] += p["dx"] * dt
+                p["y"] += p["dy"] * dt
+                p["dx"] *= 0.92
+                p["dy"] *= 0.92
+                alive.append(p)
+        self.parts = alive
+
+    def hurt(self, amt):
+        if self.down_t > 0:
+            return
+        self.hp -= amt
+        if self.hp <= 0:
+            self.hp = 0
+            self.die()
+
+    def die(self):
+        self.leave_car()
+        self.cash = int(self.cash * 0.5)
+        self.wanted = 0
+        self.down_t = 3.5
+        self.say("WASTED - paranın yarısını kaybettin", 3.5)
+
+    def respawn(self):
+        self.px, self.py = self.free_point(road=True)
+        self.hp = 100.0
+        self.cars = [c for c in self.cars if c["kind"] != "police"]
+        self.bullets = []
+        self.say("Hastanede uyandın")
+
+    # ---------- Çizim ----------
+    def render(self):
+        cv = self.cv
+        cv.delete("all")
+        self.w = max(cv.winfo_width(), 2)
+        self.h = max(cv.winfo_height(), 2)
+        cam_x, cam_y = self.cam_x, self.cam_y
+
+        x0 = max(0, int(cam_x // TS))
+        x1 = min(MW - 1, int((cam_x + self.w) // TS))
+        y0 = max(0, int(cam_y // TS))
+        y1 = min(MH - 1, int((cam_y + self.h) // TS))
+        for ty in range(y0, y1 + 1):
+            for tx in range(x0, x1 + 1):
+                sx = tx * TS - cam_x
+                sy = ty * TS - cam_y
+                t = self.tiles[ty][tx]
+                if t == BLDG:
+                    cv.create_rectangle(sx, sy, sx + TS, sy + TS, fill=self.cols[ty][tx],
+                                        outline="#15151f")
+                    cv.create_rectangle(sx + 6, sy + 6, sx + TS - 6, sy + TS - 6,
+                                        fill="#00000022", outline="")
+                    continue
+                cv.create_rectangle(sx, sy, sx + TS, sy + TS, fill=self.cols[ty][tx], outline="")
+                if t == PARK and (tx * 7 + ty * 13) % 5 == 0:
+                    cv.create_oval(sx + 10, sy + 10, sx + 30, sy + 30, fill="#1b4332", outline="")
+                if t == ROAD:
+                    bx, by = tx % BLK, ty % BLK
+                    if by == 0 and bx >= RW and tx % 2 == 0:
+                        cv.create_line(sx + 4, sy + TS, sx + TS - 4, sy + TS, fill="#f2cc0f", width=2)
+                    if bx == 0 and by >= RW and ty % 2 == 0:
+                        cv.create_line(sx + TS, sy + 4, sx + TS, sy + TS - 4, fill="#f2cc0f", width=2)
+
+        for c in self.cars:
+            self.draw_car(c)
+
+        for p in self.peds:
+            sx, sy = p["x"] - cam_x, p["y"] - cam_y
+            if -10 < sx < self.w + 10 and -10 < sy < self.h + 10:
+                cv.create_oval(sx - 6, sy - 6, sx + 6, sy + 6, fill=p["col"], outline="#111")
+
+        for b in self.bullets:
+            sx, sy = b["x"] - cam_x, b["y"] - cam_y
+            col = "#ffe066" if b["by"] == "p" else "#ff4d4d"
+            cv.create_oval(sx - 3, sy - 3, sx + 3, sy + 3, fill=col, outline="")
+
+        for p in self.parts:
+            sx, sy = p["x"] - cam_x, p["y"] - cam_y
+            cv.create_rectangle(sx - 2, sy - 2, sx + 2, sy + 2, fill=p["col"], outline="")
+
+        if self.down_t <= 0:
+            if self.car is None:
+                sx, sy = self.px - cam_x, self.py - cam_y
+                cv.create_line(sx, sy, sx + math.cos(self.pa) * 16, sy + math.sin(self.pa) * 16,
+                               fill="#ffffff", width=3)
+                cv.create_oval(sx - 8, sy - 8, sx + 8, sy + 8, fill="#ffd166", outline="#000",
+                               width=2)
+
+        self.draw_mission()
+        self.draw_hud()
+
+    def draw_car(self, c):
+        cv = self.cv
+        sx, sy = c["x"] - self.cam_x, c["y"] - self.cam_y
+        if sx < -60 or sx > self.w + 60 or sy < -60 or sy > self.h + 60:
+            return
+        a = c["a"]
+        cv.create_polygon(rot_rect(sx, sy, a, 18, 10), fill=c["col"], outline="#000")
+        cv.create_polygon(rot_rect(sx + math.cos(a) * 5, sy + math.sin(a) * 5, a, 6, 7),
+                          fill="#9bd3ff", outline="")
+        if c["kind"] == "police":
+            lc = "#ff2a2a" if int(self.t * 8) % 2 else "#2a7bff"
+            cv.create_rectangle(sx - 3, sy - 3, sx + 3, sy + 3, fill=lc, outline="")
+        if c["kind"] == "mine":
+            cv.create_oval(sx - 3, sy - 3, sx + 3, sy + 3, fill="#22d3ee", outline="")
+
+    def draw_mission(self):
+        cv = self.cv
+        mx, my = self.mission
+        sx, sy = mx - self.cam_x, my - self.cam_y
+        if 0 <= sx <= self.w and 0 <= sy <= self.h:
+            r = 16 + 4 * math.sin(self.t * 6)
+            cv.create_oval(sx - r, sy - r, sx + r, sy + r, outline="#ffd60a", width=3)
+            cv.create_oval(sx - 4, sy - 4, sx + 4, sy + 4, fill="#ffd60a", outline="")
+        else:
+            dx, dy = sx - self.w / 2, sy - self.h / 2
+            n = math.hypot(dx, dy) or 1.0
+            edge = min(self.w, self.h) / 2 - 60
+            ex, ey = self.w / 2 + dx / n * edge, self.h / 2 + dy / n * edge
+            cv.create_oval(ex - 9, ey - 9, ex + 9, ey + 9, fill="#ffd60a", outline="#000")
+
+    def draw_hud(self):
+        cv = self.cv
+        w, h = self.w, self.h
+        cv.create_rectangle(16, 16, 216, 34, fill="#000000", outline="#ffffff")
+        cv.create_rectangle(18, 18, 18 + 196 * self.hp / 100, 32, fill="#e63946", outline="")
+        cv.create_text(16, 50, anchor="w", text="$ %d" % self.cash, fill=STAR_C,
+                       font=("Consolas", 18, "bold"))
+        stars = "★" * self.wanted + "☆" * (MAX_WANTED - self.wanted)
+        cv.create_text(16, 84, anchor="w", text="ARANIYOR " + stars, fill="#ff5c8a",
+                       font=("Consolas", 13, "bold"))
+        cv.create_text(w / 2, 22, text="GÖREV: işaretli yere git  |  ödül $%d" % self.mission_reward,
+                       fill="#ffd60a", font=("Consolas", 12, "bold"))
+        if self.msg_t > 0:
+            cv.create_text(w / 2, 56, text=self.msg, fill="#ffffff", font=("Consolas", 16, "bold"))
+        if self.car is not None:
+            cv.create_text(16, 110, anchor="w", text="HIZ %d km/s  |  ARAÇ %d%%" %
+                           (abs(self.car["v"]) * 0.5, max(0, self.car["hp"] / 6 * 100)),
+                           fill="#22d3ee", font=("Consolas", 12))
+        if self.down_t > 0:
+            cv.create_text(w / 2, h / 2, text="WASTED", fill="#ff2a2a",
+                           font=("Consolas", 48, "bold"))
+        cv.create_text(16, h - 16, anchor="sw",
+                       text="%d FPS" % self.fps, fill="#7dffb3", font=("Consolas", 10))
+        cv.create_text(w / 2, h - 16,
+                       text="WASD hareket | Fare nişan, sol tık / Boşluk ateş | E araca bin/in | "
+                            "Shift koş | ESC çık",
+                       fill="#c9a8ff", font=("Consolas", 10))
+        mx0, my0 = w - 196, h - 196
+        cv.create_image(mx0, my0, anchor="nw", image=self.mini)
+        cv.create_rectangle(mx0 - 2, my0 - 2, mx0 + 180, my0 + 180, outline="#ffffff")
+        px = mx0 + self.px / TS * 2
+        py = my0 + self.py / TS * 2
+        cv.create_oval(px - 3, py - 3, px + 3, py + 3, fill="#ffffff", outline="")
+        mxm = mx0 + self.mission[0] / TS * 2
+        mym = my0 + self.mission[1] / TS * 2
+        cv.create_oval(mxm - 3, mym - 3, mxm + 3, mym + 3, fill="#ffd60a", outline="")
+
+    # ---------- Döngü ----------
+    def loop(self):
+        if self.dead:
+            return
+        try:
+            now = time.perf_counter()
+            dt = min(0.05, now - self.last)
+            self.last = now
+            self.update(dt)
+            self.render()
+        except tk.TclError:
+            return
+        self.fps = self.fps * 0.9 + (1.0 / max(dt, 1e-3)) * 0.1
+        self.win.after(16, self.loop)
+
+
+def play(root):
+    Game(root)
