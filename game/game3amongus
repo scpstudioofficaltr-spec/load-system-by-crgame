@@ -355,3 +355,1345 @@ class NameField(object):
         self.on_click = on_click
 
     def contains(self, x, y):
+        return self.x <= x <= self.x + self.w and self.y <= y <= self.y + self.h
+
+    def click(self, x, y):
+        if self.contains(x, y) and self.on_click:
+            self.on_click()
+
+    def draw(self, c, hover=False):
+        pass
+
+
+# ------------------------------------------------------------------- uygulama
+class App(object):
+    def __init__(self, root):
+        self.root = root
+        self.running = True
+        self.state = "menu"
+        self.settings = {"diff": 1, "fps": True, "shake": True, "autoaim": False}
+        self.settings_back = "menu"
+        self._root_prev = ""
+        self.buttons = []
+        self.hover_idx = -1
+        self.keys = {}
+        self.mx = W / 2.0
+        self.my = H / 2.0
+        self.mouse_in = False
+        self.fire_held = False
+        self.scores = self.load_scores()
+        self.name_input = ""
+        self.pending_score = None
+        self.name_active = False
+        self.stars = []
+        for _ in range(90):
+            self.stars.append((random.uniform(0, W), random.uniform(PLAY_TOP, H),
+                               random.choice((1, 1, 2, 2, 3)),
+                               random.uniform(0.25, 1.0)))
+        self.ox = 0.0
+        self.oy = 0.0
+        self.shake = 0.0
+        self.time_acc = 0.0
+        self.last_t = time.time()
+        self.fps_t = self.last_t
+        self.frames = 0
+        self.fps = 0.0
+        self.after_id = None
+        self.build_window()
+        self.enter_state("menu")
+
+    # ------------------------------------------------------------- pencere
+    def build_window(self):
+        self.win = tk.Toplevel(self.root)
+        self.win.title("Among Us 2D")
+        self.win.configure(bg=C_BG)
+        self.win.resizable(False, False)
+        self.canvas = tk.Canvas(self.win, width=W, height=H, bg=C_BG,
+                                highlightthickness=0, bd=0)
+        self.canvas.pack()
+        self.win.protocol("WM_DELETE_WINDOW", self.quit_app)
+        self.install_root_protocol()
+        binds = (("<KeyPress>", self.on_key_press),
+                 ("<KeyRelease>", self.on_key_release),
+                 ("<Button-1>", self.on_button_press),
+                 ("<ButtonRelease-1>", self.on_button_release),
+                 ("<Motion>", self.on_motion),
+                 ("<Leave>", self.on_leave))
+        for seq, fn in binds:
+            self.win.bind(seq, fn)
+        self.canvas.bind("<Configure>", lambda e: None)
+        try:
+            self.win.focus_force()
+            self.canvas.focus_set()
+        except Exception:
+            traceback.print_exc()
+
+    def install_root_protocol(self):
+        """Ana pencerenin kapanis akisini temiz sekilde baglar."""
+        prev = ""
+        try:
+            prev = self.root.protocol("WM_DELETE_WINDOW")
+        except Exception:
+            traceback.print_exc()
+        self._root_prev = prev if prev and prev not in ("", "None") else ""
+        self._root_ours = ""
+
+        def _close():
+            self.on_root_close()
+
+        try:
+            self.root.protocol("WM_DELETE_WINDOW", _close)
+            self._root_ours = self.root.protocol("WM_DELETE_WINDOW") or ""
+        except Exception:
+            traceback.print_exc()
+
+    def quit_app(self):
+        self.running = False
+        try:
+            if self.win is not None and self.win.winfo_exists():
+                self.win.destroy()
+        except Exception:
+            traceback.print_exc()
+        self.call_prev_root_handler()
+        try:
+            if self.root.winfo_exists():
+                self.root.destroy()
+        except Exception:
+            traceback.print_exc()
+
+    def call_prev_root_handler(self):
+        prev = getattr(self, "_root_prev", "")
+        try:
+            cur = self.root.protocol("WM_DELETE_WINDOW")
+        except Exception:
+            cur = ""
+        if cur and cur != getattr(self, "_root_ours", "") and cur != prev:
+            prev = cur
+        if prev:
+            try:
+                self.root.tk.call(prev)
+                self._root_prev = ""
+            except Exception:
+                traceback.print_exc()
+
+    def on_root_close(self):
+        self.quit_app()
+
+    # ---------------------------------------------------------- skor tablosu
+    def load_scores(self):
+        out = []
+        try:
+            with open(SCORE_FILE, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        sc, nm = line.split("|", 1)
+                        out.append((int(sc), nm.strip()[:12] or "PILOT"))
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+        out.sort(key=lambda t: -t[0])
+        return out[:10]
+
+    def save_scores(self):
+        try:
+            with open(SCORE_FILE, "w", encoding="utf-8") as fh:
+                for sc, nm in self.scores[:10]:
+                    fh.write("%d|%s\n" % (sc, nm))
+        except Exception:
+            traceback.print_exc()
+
+    def store_score(self):
+        if self.pending_score is None:
+            return
+        name = (self.name_input or "").strip()[:12] or "PILOT"
+        self.scores.append((int(self.pending_score), name))
+        self.scores.sort(key=lambda t: -t[0])
+        self.scores = self.scores[:10]
+        self.save_scores()
+        self.pending_score = None
+        self.name_active = False
+
+    # -------------------------------------------------------------- durumlar
+    def enter_state(self, st):
+        self.state = st
+        self.hover_idx = -1
+        self.buttons = []
+        if st == "menu":
+            self.build_menu_buttons()
+        elif st == "settings":
+            self.build_settings_buttons()
+        elif st == "play":
+            self.build_play_buttons()
+        elif st == "pause":
+            self.build_pause_buttons()
+        elif st == "levelclear":
+            self.build_levelclear_buttons()
+        elif st in ("gameover", "victory"):
+            self.build_gameover_buttons()
+        elif st == "settings":
+            pass
+
+    def build_menu_buttons(self):
+        bw, bh, bx = 230, 58, W / 2.0 - 115
+        self.buttons = [
+            Btn(bx, 215, bw, bh, "PLAY", self.start_game, "primary", 20, "SAVAS BASLAT"),
+            Btn(bx, 291, bw, bh, "SETTINGS", lambda: self.open_settings("menu"), "ghost", 18, "AYARLAR"),
+            Btn(bx, 367, bw, bh, "QUIT", self.quit_app, "danger", 18, "CIKIS"),
+        ]
+
+    def build_settings_buttons(self):
+        self.settings_rows = [
+            SettingRow(240, 140, 480, 62, "ZORLUK",
+                       [d["name"] for d in DIFFS], self.settings["diff"],
+                       lambda v: self.settings.__setitem__("diff", v)),
+            SettingRow(240, 216, 480, 62, "FPS GOSTER",
+                       ["ACIK", "KAPALI"], 0 if self.settings["fps"] else 1,
+                       lambda v: self.settings.__setitem__("fps", v == 0)),
+            SettingRow(240, 292, 480, 62, "EKRAN SARSINTISI",
+                       ["ACIK", "KAPALI"], 0 if self.settings["shake"] else 1,
+                       lambda v: self.settings.__setitem__("shake", v == 0)),
+            SettingRow(240, 368, 480, 62, "OTOMATIK NISAN",
+                       ["KAPALI", "ACIK"], 0 if not self.settings["autoaim"] else 1,
+                       lambda v: self.settings.__setitem__("autoaim", v == 1)),
+        ]
+        back = Btn(W / 2.0 - 110, 468, 220, 54, "GERI",
+                   lambda: self.enter_state(self.settings_back), "ghost", 17)
+        self.buttons = list(self.settings_rows) + [back]
+
+    def build_play_buttons(self):
+        self.buttons = []
+
+    def build_pause_buttons(self):
+        bw, bh, bx = 240, 54, W / 2.0 - 120
+        self.buttons = [
+            Btn(bx, 196, bw, bh, "RESUME", self.resume_game, "primary", 18),
+            Btn(bx, 262, bw, bh, "SETTINGS", lambda: self.open_settings("pause"), "ghost", 17),
+            Btn(bx, 328, bw, bh, "MAIN MENU", self.to_menu, "ghost", 17),
+            Btn(bx, 394, bw, bh, "QUIT", self.quit_app, "danger", 17),
+        ]
+
+    def build_levelclear_buttons(self):
+        self.buttons = [Btn(W / 2.0 - 120, 400, 240, 56, "DEVAM ET", self.next_level, "ok", 18)]
+
+    def build_gameover_buttons(self):
+        bw, bh = 210, 52
+        self.buttons = [
+            NameField(W / 2.0 - 230, 412, 460, 44, lambda: setattr(self, "name_active", True)),
+            Btn(W / 2.0 - 225, 470, bw, bh, "TEKRAR DENE", self.start_game, "primary", 16),
+            Btn(W / 2.0 + 15, 470, bw, bh, "ANA MENU", self.to_menu, "ghost", 16),
+        ]
+
+    def open_settings(self, back):
+        self.settings_back = back
+        self.enter_state("settings")
+
+    # ------------------------------------------------------------ oyun akisi
+    def start_game(self):
+        d = DIFFS[self.settings["diff"]]
+        self.diff = d
+        self.score = 0
+        self.combo = 1
+        self.combo_t = 0.0
+        self.level_idx = 0
+        self.wave_idx = 0
+        self.player = Player(W / 2.0, H - 150)
+        self.enemies = []
+        self.pbullets = []
+        self.ebullets = []
+        self.particles = []
+        self.pickups = []
+        self.powerups = {"rapid": 0.0, "spread": 0.0, "shield": 0.0}
+        self.fire_cd = 0.0
+        self.fire_interval = 0.20
+        self.spawn_queue = []
+        self.spawn_t = 0.0
+        self.wave_clear_t = 0.0
+        self.contact_cd = 0.0
+        self.banner = ""
+        self.banner_t = 0.0
+        self.game_time = 0.0
+        self.shake = 0.0
+        self.name_input = ""
+        self.pending_score = None
+        self.name_active = False
+        self.start_level(0)
+        self.enter_state("play")
+
+    def start_level(self, idx):
+        self.level_idx = idx
+        self.wave_idx = 0
+        self.enemies = []
+        self.pbullets = []
+        self.ebullets = []
+        self.pickups = []
+        self.spawn_queue = []
+        self.spawn_t = 0.0
+        self.wave_clear_t = 0.0
+        self.player.hp = min(self.player.maxhp, self.player.hp + 35)
+        self.banner = LEVELS[idx]["name"]
+        self.banner_t = 2.6
+        self.start_wave()
+
+    def start_wave(self):
+        groups = LEVELS[self.level_idx]["waves"][self.wave_idx]
+        queue = []
+        t = 0.0
+        for kind, count, interval in groups:
+            for _ in range(count):
+                queue.append((t, kind))
+                t += interval
+        queue.sort(key=lambda it: it[0])
+        self.spawn_queue = queue
+        self.spawn_t = 0.0
+        self.wave_clear_t = 0.0
+
+    def next_wave(self):
+        self.wave_idx += 1
+        if self.wave_idx >= len(LEVELS[self.level_idx]["waves"]):
+            self.level_clear()
+        else:
+            self.start_wave()
+            self.banner = "DALGA %d" % (self.wave_idx + 1)
+            self.banner_t = 1.8
+
+    def level_clear(self):
+        bonus = int(500 * (self.level_idx + 1) * self.diff["score"])
+        self.score += bonus
+        self.last_bonus = bonus
+        self.enemies = []
+        self.ebullets = []
+        if self.level_idx >= len(LEVELS) - 1:
+            self.pending_score = int(self.score)
+            self.name_input = ""
+            self.name_active = True
+            self.enter_state("victory")
+        else:
+            self.enter_state("levelclear")
+
+    def next_level(self):
+        self.start_level(self.level_idx + 1)
+        self.enter_state("play")
+
+    def to_menu(self):
+        if self.state in ("gameover", "victory") and self.pending_score is not None:
+            self.store_score()
+        self.enemies = []
+        self.pbullets = []
+        self.ebullets = []
+        self.particles = []
+        self.pickups = []
+        self.enter_state("menu")
+
+    def game_over(self):
+        self.pending_score = int(self.score)
+        self.name_input = ""
+        self.name_active = True
+        self.enemies = []
+        self.pbullets = []
+        self.ebullets = []
+        self.enter_state("gameover")
+
+    def pause_game(self):
+        if self.state == "play":
+            self.enter_state("pause")
+
+    def resume_game(self):
+        if self.state == "pause":
+            self.enter_state("play")
+
+    def toggle_pause(self):
+        if self.state == "play":
+            self.pause_game()
+        elif self.state == "pause":
+            self.resume_game()
+
+    # ------------------------------------------------------------ girdi
+    def on_key_press(self, e):
+        try:
+            key = e.keysym
+            self.keys[key] = True
+            if key == "Escape":
+                if self.state in ("gameover", "victory"):
+                    self.to_menu()
+                elif self.state == "settings":
+                    self.enter_state(self.settings_back)
+                else:
+                    self.toggle_pause()
+                return
+            if self.state == "gameover" or self.state == "victory":
+                if key == "Return" or key == "KP_Enter":
+                    if self.pending_score is not None:
+                        self.store_score()
+                    else:
+                        self.to_menu()
+                    return
+                if self.name_active:
+                    if key == "BackSpace":
+                        self.name_input = self.name_input[:-1]
+                    elif len(key) == 1 and key.isprintable() and len(self.name_input) < 12:
+                        self.name_input += key
+                return
+            if self.state == "levelclear" and (key == "Return" or key == "KP_Enter"):
+                self.next_level()
+                return
+            if self.state == "menu" and key in ("Return", "KP_Enter"):
+                self.start_game()
+        except Exception:
+            traceback.print_exc()
+
+    def on_key_release(self, e):
+        try:
+            self.keys[e.keysym] = False
+        except Exception:
+            traceback.print_exc()
+
+    def on_button_press(self, e):
+        try:
+            self.mx = e.x
+            self.my = e.y
+            self.mouse_in = True
+            if self.state == "play":
+                self.fire_held = True
+            else:
+                for b in self.buttons:
+                    if b.contains(e.x, e.y):
+                        b.click(e.x, e.y)
+                        self.hover_idx = -1
+                        break
+        except Exception:
+            traceback.print_exc()
+
+    def on_button_release(self, e):
+        try:
+            self.fire_held = False
+        except Exception:
+            traceback.print_exc()
+
+    def on_motion(self, e):
+        try:
+            self.mx = e.x
+            self.my = e.y
+            self.mouse_in = True
+            self.hover_idx = -1
+            for i, b in enumerate(self.buttons):
+                if b.contains(e.x, e.y):
+                    self.hover_idx = i
+                    break
+        except Exception:
+            traceback.print_exc()
+
+    def on_leave(self, e):
+        try:
+            self.mouse_in = False
+            self.hover_idx = -1
+        except Exception:
+            traceback.print_exc()
+
+    # -------------------------------------------------------------- mantik
+    def burst(self, x, y, n, color, spd=170, size=3, life=0.45):
+        for _ in range(n):
+            a = random.uniform(0, math.tau)
+            v = random.uniform(spd * 0.35, spd)
+            self.particles.append(Particle(x, y, math.cos(a) * v, math.sin(a) * v,
+                                           random.uniform(life * 0.5, life),
+                                           random.uniform(size * 0.6, size), color))
+
+    def spawn_point(self):
+        pad = 70
+        side = random.randint(0, 3)
+        if side == 0:
+            return random.uniform(pad, W - pad), PLAY_TOP + 20
+        if side == 1:
+            return random.uniform(pad, W - pad), H - 40
+        if side == 2:
+            return pad, random.uniform(PLAY_TOP + 40, H - 40)
+        return W - pad, random.uniform(PLAY_TOP + 40, H - 40)
+
+    def spawn_enemy(self, kind):
+        x, y = self.spawn_point()
+        for _ in range(14):
+            if dist2(x, y, self.player.x, self.player.y) > 220 * 220:
+                break
+            x, y = self.spawn_point()
+        st = ENEMY_STATS[kind]
+        d = self.diff
+        e = Enemy(kind, x, y)
+        e.hp = e.maxhp = st["hp"] * d["hp"] * (1.0 + 0.12 * self.level_idx)
+        e.speed = st["speed"] * d["spd"] * (1.0 + 0.05 * self.level_idx)
+        e.dmg = st["dmg"] * d["dmg"]
+        self.enemies.append(e)
+
+    def fire(self):
+        p = self.player
+        ang = p.aim
+        n = 3 if self.powerups["spread"] > 0 else 1
+        offs = [0.0] if n == 1 else [-0.16, 0.0, 0.16]
+        for o in offs:
+            a = ang + o
+            b = Bullet(p.x + math.cos(a) * 20, p.y + math.sin(a) * 20,
+                       math.cos(a) * 640, math.sin(a) * 640, 4.5, 11,
+                       C_CYAN, True, mix(C_CYAN, "#ffffff", 0.35))
+            self.pbullets.append(b)
+        self.player.muzzle = 0.07
+        p.vx -= math.cos(ang) * 46
+        p.vy -= math.sin(ang) * 46
+        self.burst(p.x + math.cos(ang) * 22, p.y + math.sin(ang) * 22, 3, C_CYAN, 120, 2, 0.2)
+
+    def hurt_player(self, amount):
+        if self.state != "play":
+            return
+        if self.player.invuln > 0:
+            return
+        if self.powerups["shield"] > 0:
+            self.powerups["shield"] = 0.0
+            self.player.invuln = 0.9
+            self.burst(self.player.x, self.player.y, 16, C_CYAN, 200, 3, 0.5)
+            self.shake = 5
+            return
+        self.player.hp -= amount
+        self.player.invuln = 0.75
+        self.combo = 1
+        self.combo_t = 0.0
+        self.shake = 9
+        self.burst(self.player.x, self.player.y, 12, C_DANGER, 190, 3, 0.45)
+        if self.player.hp <= 0:
+            self.player.hp = 0
+            self.game_over()
+
+    def kill_enemy(self, e):
+        e.dead = True
+        self.combo_t = 2.6
+        self.combo = min(5, self.combo + 1)
+        gain = int(e.score * self.diff["score"] * self.combo)
+        self.score += gain
+        self.burst(e.x, e.y, 14, e.color, 220, 4, 0.55)
+        self.burst(e.x, e.y, 6, shade(e.color, 1.4), 140, 3, 0.4)
+        roll = random.random()
+        if e.kind == "boss":
+            self.burst(e.x, e.y, 60, e.color, 320, 6, 1.0)
+            self.shake = 16
+        elif roll < 0.12:
+            self.pickups.append(Pickup(e.x, e.y, "health"))
+        elif roll < 0.21:
+            self.pickups.append(Pickup(e.x, e.y, "rapid"))
+        elif roll < 0.30:
+            self.pickups.append(Pickup(e.x, e.y, "spread"))
+        elif roll < 0.40:
+            self.pickups.append(Pickup(e.x, e.y, "gem"))
+
+    def damage_enemy(self, e, dmg):
+        e.hp -= dmg
+        e.flash = 0.09
+        if e.hp <= 0:
+            self.kill_enemy(e)
+
+    def update_enemy(self, e, dt):
+        p = self.player
+        dx = p.x - e.x
+        dy = p.y - e.y
+        d = math.sqrt(dx * dx + dy * dy) or 1.0
+        nx = dx / d
+        ny = dy / d
+        e.aim = math.atan2(dy, dx)
+        e.flash = max(0.0, e.flash - dt)
+        e.bob += dt
+
+        if e.kind == "imp":
+            if e.state == "chase":
+                e.ax = nx
+                e.ay = ny
+                e.dash_cd -= dt
+                if e.dash_cd <= 0 and d < 320:
+                    e.state = "windup"
+                    e.timer = 0.38
+            elif e.state == "windup":
+                e.timer -= dt
+                e.ax = nx * 0.25
+                e.ay = ny * 0.25
+                if e.timer <= 0:
+                    e.state = "dash"
+                    e.timer = 0.48
+                    e.dash_x = nx
+                    e.dash_y = ny
+            elif e.state == "dash":
+                e.timer -= dt
+                e.ax = e.dash_x
+                e.ay = e.dash_y
+                if e.timer <= 0:
+                    e.state = "recover"
+                    e.timer = 0.5
+            else:
+                e.timer -= dt
+                e.ax = -nx * 0.35
+                e.ay = -ny * 0.35
+                if e.timer <= 0:
+                    e.state = "chase"
+                    e.dash_cd = random.uniform(1.6, 2.8)
+            sp = e.speed * (1.9 if e.state == "dash" else 1.0)
+            if e.state == "windup":
+                sp = e.speed * 0.25
+
+        elif e.kind == "guard":
+            want = 300.0
+            e.strafe_cd -= dt
+            if e.strafe_cd <= 0:
+                e.strafe = -e.strafe
+                e.strafe_cd = random.uniform(1.0, 2.2)
+            if d > want + 70:
+                e.ax = nx
+                e.ay = ny
+            elif d < want - 70:
+                e.ax = -nx
+                e.ay = -ny
+            else:
+                e.ax = -ny * e.strafe
+                e.ay = nx * e.strafe
+            # atisdan kacinma
+            for b in self.pbullets:
+                if not b.alive:
+                    continue
+                if dist2(b.x, b.y, e.x, e.y) < 78 * 78:
+                    e.ax += -ny * e.strafe * 1.4
+                    e.ay += nx * e.strafe * 1.4
+                    break
+            e.fire_cd -= dt
+            if e.fire_cd <= 0 and d < 720:
+                e.fire_cd = random.uniform(1.35, 2.1) / (1.0 + 0.12 * self.level_idx)
+                n = 1 + (1 if self.level_idx >= 1 else 0) + (1 if self.level_idx >= 2 else 0)
+                spread = 0.14
+                for i in range(n):
+                    a = e.aim + (i - (n - 1) / 2.0) * spread
+                    self.ebullets.append(Bullet(e.x + math.cos(a) * 24, e.y + math.sin(a) * 24,
+                                                math.cos(a) * 300, math.sin(a) * 300, 5, 9,
+                                                C_DANGER, False, C_WARN))
+            sp = e.speed
+
+        elif e.kind == "drone":
+            wob = math.sin(self.game_time * 3.1 + e.phase) * 0.75
+            a = math.atan2(ny, nx) + wob
+            e.ax = math.cos(a)
+            e.ay = math.sin(a)
+            sp = e.speed
+            if d < e.r + p.r:
+                self.hurt_player(e.dmg)
+                self.kill_enemy(e)
+                return
+
+        else:  # boss
+            e.fire_cd -= dt
+            e.timer -= dt
+            if e.state == "idle":
+                e.ax = nx * 0.45
+                e.ay = ny * 0.45
+                if e.timer <= 0:
+                    if d < 300 and random.random() < 0.45:
+                        e.state = "charge"
+                        e.timer = 0.7
+                        e.charge_x = nx
+                        e.charge_y = ny
+                        e.fire_cd = 0.4
+                    else:
+                        e.state = random.choice(("volley", "radial", "summon"))
+                        e.timer = 1.5
+                        e.fire_cd = 0.2
+            elif e.state == "volley":
+                e.ax = nx * 0.25
+                e.ay = ny * 0.25
+                if e.fire_cd <= 0:
+                    e.fire_cd = 0.16
+                    for i in range(5):
+                        a = e.aim + (i - 2) * 0.11
+                        self.ebullets.append(Bullet(e.x + math.cos(a) * 50, e.y + math.sin(a) * 50,
+                                                    math.cos(a) * 280, math.sin(a) * 280, 6, 11,
+                                                    C_DANGER, False, C_WARN))
+                if e.timer <= 0:
+                    e.state = "idle"
+                    e.timer = 1.6
+            elif e.state == "radial":
+                e.ax = -nx * 0.3
+                e.ay = -ny * 0.3
+                if e.fire_cd <= 0:
+                    e.fire_cd = 0.1
+                    base = random.uniform(0, math.tau)
+                    for i in range(16):
+                        a = base + i * math.tau / 16.0
+                        self.ebullets.append(Bullet(e.x + math.cos(a) * 54, e.y + math.sin(a) * 54,
+                                                    math.cos(a) * 210, math.sin(a) * 210, 6, 10,
+                                                    C_DANGER, False, C_WARN))
+                if e.timer <= 0:
+                    e.state = "idle"
+                    e.timer = 1.5
+            elif e.state == "summon":
+                e.ax = 0.0
+                e.ay = 0.0
+                if e.fire_cd <= 0:
+                    e.fire_cd = 0.3
+                    for _ in range(2):
+                        a = random.uniform(0, math.tau)
+                        sx = clamp(e.x + math.cos(a) * 70, 40, W - 40)
+                        sy = clamp(e.y + math.sin(a) * 70, PLAY_TOP + 40, H - 40)
+                        imp = Enemy("imp", sx, sy)
+                        imp.hp = imp.maxhp = ENEMY_STATS["imp"]["hp"] * self.diff["hp"] * 0.8
+                        imp.speed = ENEMY_STATS["imp"]["speed"] * self.diff["spd"] * 1.1
+                        imp.dmg = ENEMY_STATS["imp"]["dmg"] * self.diff["dmg"]
+                        self.enemies.append(imp)
+                if e.timer <= 0:
+                    e.state = "idle"
+                    e.timer = 1.7
+            elif e.state == "charge":
+                e.ax = e.charge_x
+                e.ay = e.charge_y
+                if e.timer <= 0:
+                    e.state = "idle"
+                    e.timer = 1.2
+                    e.fire_cd = 0.5
+            sp = e.speed * (3.0 if e.state == "charge" else 1.0)
+
+        # ivme ve hareket
+        ax = e.ax
+        ay = e.ay
+        mag = math.hypot(ax, ay)
+        if mag > 1.0:
+            ax /= mag
+            ay /= mag
+        e.vx += ax * sp * 6.0 * dt
+        e.vy += ay * sp * 6.0 * dt
+        fr = 1.0 - min(0.9, 5.0 * dt)
+        e.vx *= fr
+        e.vy *= fr
+        vmag = math.hypot(e.vx, e.vy)
+        if vmag > sp:
+            e.vx = e.vx / vmag * sp
+            e.vy = e.vy / vmag * sp
+        e.x += e.vx * dt
+        e.y += e.vy * dt
+        e.x = clamp(e.x, 30, W - 30)
+        e.y = clamp(e.y, PLAY_TOP + e.r, H - e.r - 6)
+
+    def update_play(self, dt):
+        p = self.player
+        self.game_time += dt
+        self.banner_t = max(0.0, self.banner_t - dt)
+        self.contact_cd = max(0.0, self.contact_cd - dt)
+        p.invuln = max(0.0, p.invuln - dt)
+        p.muzzle = max(0.0, p.muzzle - dt)
+        for k in self.powerups:
+            self.powerups[k] = max(0.0, self.powerups[k] - dt)
+
+        # combo zamanlayici
+        if self.combo > 1:
+            self.combo_t -= dt
+            if self.combo_t <= 0:
+                self.combo = 1
+
+        # oyuncu hareketi
+        ax = 0.0
+        ay = 0.0
+        if self.keys.get("w") or self.keys.get("Up"):
+            ay -= 1.0
+        if self.keys.get("s") or self.keys.get("Down"):
+            ay += 1.0
+        if self.keys.get("a") or self.keys.get("Left"):
+            ax -= 1.0
+        if self.keys.get("d") or self.keys.get("Right"):
+            ax += 1.0
+        if ax and ay:
+            m = math.hypot(ax, ay)
+            ax /= m
+            ay /= m
+        p.vx += ax * 1900 * dt
+        p.vy += ay * 1900 * dt
+        fr = 1.0 - min(0.9, 6.5 * dt)
+        p.vx *= fr
+        p.vy *= fr
+        vmag = math.hypot(p.vx, p.vy)
+        maxv = 300.0
+        if vmag > maxv:
+            p.vx = p.vx / vmag * maxv
+            p.vy = p.vy / vmag * maxv
+        p.x = clamp(p.x + p.vx * dt, 26, W - 26)
+        p.y = clamp(p.y + p.vy * dt, PLAY_TOP + 34, H - 26)
+
+        # nişan
+        aim_x = self.mx
+        aim_y = self.my
+        if self.settings["autoaim"]:
+            best = None
+            bd = 620 * 620
+            for e in self.enemies:
+                if e.dead:
+                    continue
+                d2 = dist2(e.x, e.y, p.x, p.y)
+                if d2 < bd:
+                    bd = d2
+                    best = e
+            if best is not None:
+                aim_x = best.x
+                aim_y = best.y
+        p.aim = math.atan2(aim_y - p.y, aim_x - p.x)
+        p.bob += dt
+
+        # ates
+        self.fire_cd -= dt
+        if (self.fire_held or self.keys.get("space")) and self.fire_cd <= 0:
+            self.fire()
+            base = 0.20
+            if self.powerups["rapid"] > 0:
+                base *= 0.55
+            self.fire_cd = base
+
+        # dalga dogumu
+        self.spawn_t += dt
+        while self.spawn_queue and self.spawn_queue[0][0] <= self.spawn_t:
+            kind = self.spawn_queue.pop(0)[1]
+            self.spawn_enemy(kind)
+
+        # dusmanlar
+        for e in list(self.enemies):
+            if e.dead:
+                continue
+            self.update_enemy(e, dt)
+
+        # dusmanlarin birbirine itmesi
+        for i in range(len(self.enemies)):
+            a = self.enemies[i]
+            if a.dead:
+                continue
+            for j in range(i + 1, len(self.enemies)):
+                b = self.enemies[j]
+                if b.dead:
+                    continue
+                d2 = dist2(a.x, a.y, b.x, b.y)
+                rr = (a.r + b.r) * 0.95
+                if d2 < rr * rr and d2 > 0.01:
+                    d = math.sqrt(d2)
+                    push = (rr - d) * 0.5
+                    ux = (b.x - a.x) / d
+                    uy = (b.y - a.y) / d
+                    a.x -= ux * push
+                    a.y -= uy * push
+                    b.x += ux * push
+                    b.y += uy * push
+
+        # oyuncu mermileri
+        for b in self.pbullets:
+            b.x += b.vx * dt
+            b.y += b.vy * dt
+            b.life -= dt
+            if b.life <= 0 or b.x < -20 or b.x > W + 20 or b.y < PLAY_TOP - 20 or b.y > H + 20:
+                b.alive = False
+                continue
+            for e in self.enemies:
+                if e.dead:
+                    continue
+                rr = b.r + e.r
+                if dist2(b.x, b.y, e.x, e.y) < rr * rr:
+                    self.damage_enemy(e, b.dmg)
+                    self.burst(b.x, b.y, 4, C_CYAN, 120, 2, 0.22)
+                    if b.pierce > 0:
+                        b.pierce -= 1
+                    else:
+                        b.alive = False
+                    break
+        self.pbullets = [b for b in self.pbullets if b.alive]
+
+        # dusman mermileri
+        for b in self.ebullets:
+            b.x += b.vx * dt
+            b.y += b.vy * dt
+            b.life -= dt
+            if b.life <= 0 or b.x < -20 or b.x > W + 20 or b.y < PLAY_TOP - 20 or b.y > H + 20:
+                b.alive = False
+                continue
+            rr = b.r + p.r
+            if dist2(b.x, b.y, p.x, p.y) < rr * rr:
+                b.alive = False
+                self.hurt_player(b.dmg)
+        self.ebullets = [b for b in self.ebullets if b.alive]
+
+        # temas hasari
+        if self.contact_cd <= 0:
+            for e in self.enemies:
+                if e.dead or e.kind == "drone":
+                    continue
+                rr = e.r + p.r * 0.85
+                if dist2(e.x, e.y, p.x, p.y) < rr * rr:
+                    self.hurt_player(e.dmg)
+                    self.contact_cd = 0.7
+                    self.burst(e.x, e.y, 6, e.color, 160, 3, 0.3)
+                    break
+
+        # toplama nesneleri
+        for it in list(self.pickups):
+            it.t += dt
+            it.vy = min(70.0, it.vy + 120 * dt)
+            it.y += it.vy * dt
+            if dist2(it.x, it.y, p.x, p.y) < (p.r + 16) ** 2:
+                self.pickups.remove(it)
+                self.apply_pickup(it.kind)
+            elif it.y > H - 10:
+                self.pickups.remove(it)
+
+        # parcaciklar
+        for q in self.particles:
+            q.x += q.vx * dt
+            q.y += q.vy * dt
+            q.vx *= 1.0 - min(0.9, q.drag * dt)
+            q.vy *= 1.0 - min(0.9, q.drag * dt)
+            q.life -= dt
+        self.particles = [q for q in self.particles if q.life > 0]
+
+        # ekran sarsintisi
+        if self.settings["shake"] and self.shake > 0:
+            self.shake = max(0.0, self.shake - dt * 26)
+            self.ox = random.uniform(-self.shake, self.shake)
+            self.oy = random.uniform(-self.shake, self.shake)
+        else:
+            self.ox = 0.0
+            self.oy = 0.0
+
+        # dalga / seviye akisi
+        alive = len([e for e in self.enemies if not e.dead])
+        if not self.spawn_queue and alive == 0:
+            self.wave_clear_t += dt
+            if self.wave_clear_t > 1.0:
+                self.next_wave()
+        else:
+            self.wave_clear_t = 0.0
+
+    def apply_pickup(self, kind):
+        p = self.player
+        if kind == "health":
+            p.hp = min(p.maxhp, p.hp + 25)
+            self.burst(p.x, p.y, 12, C_OK, 170, 3, 0.4)
+        elif kind == "rapid":
+            self.powerups["rapid"] = 8.0
+            self.burst(p.x, p.y, 12, C_WARN, 170, 3, 0.4)
+        elif kind == "spread":
+            self.powerups["spread"] = 9.0
+            self.burst(p.x, p.y, 12, C_CYAN, 170, 3, 0.4)
+        elif kind == "gem":
+            self.score += int(150 * self.diff["score"] * self.combo)
+            self.burst(p.x, p.y, 10, C_GOLD, 170, 3, 0.35)
+
+    # ---------------------------------------------------------------- cizim
+    def draw_background(self, c, t):
+        c.create_rectangle(0, 0, W, H, fill=C_BG, outline="")
+        c.create_rectangle(0, 0, W, PLAY_TOP, fill=C_BG2, outline="")
+        for s in self.stars:
+            x = (s[0] - t * 14 * s[3]) % W
+            y = (s[1] - t * 26 * s[3]) % (H - PLAY_TOP) + PLAY_TOP
+            c.create_rectangle(x, y, x + s[2], y + s[2],
+                               fill=mix(C_BG, C_DIM, 0.25 + 0.35 * s[3]), outline="")
+        # dekoratif gezegenler
+        c.create_oval(700, PLAY_TOP + 30, 830, PLAY_TOP + 160, fill=mix(C_BG, "#2b2350", 0.9), outline="")
+        c.create_oval(726, PLAY_TOP + 56, 804, PLAY_TOP + 134, fill=mix(C_BG, "#332a5e", 0.9), outline="")
+
+    def draw_actor(self, c, x, y, r, color, dark, aim=0.0, bob=0.0, flash=0.0,
+                   armed=None, scale=1.0):
+        body_w = r * 1.7 * scale
+        body_h = r * 2.0 * scale
+        x1 = x - body_w / 2.0
+        x2 = x + body_w / 2.0
+        y1 = y - body_h / 2.0 + bob
+        y2 = y + body_h / 2.0 + bob
+        col = mix(color, "#ffffff", 0.72) if flash > 0 else color
+        c.create_oval(x - body_w * 0.62, y2 - body_h * 0.16, x + body_w * 0.62,
+                      y2 + body_h * 0.12, fill=C_SHADOW, outline="")
+        # sirt cantasi
+        c.create_polygon(rounded_points(x1 - body_w * 0.26, y1 + body_h * 0.18,
+                                        x1 + body_w * 0.10, y2 - body_h * 0.18, r * 0.22),
+                         smooth=True, fill=dark, outline="")
+        # govde
+        c.create_polygon(rounded_points(x1, y1, x2, y2, r * 0.55), smooth=True, fill=col, outline="")
+        # alt golge
+        c.create_polygon(rounded_points(x1, y1 + body_h * 0.46, x2, y2, r * 0.5),
+                         smooth=True, fill=dark, outline="")
+        # parlama
+        c.create_polygon(rounded_points(x1 + body_w * 0.12, y1 + body_h * 0.08,
+                                        x1 + body_w * 0.44, y1 + body_h * 0.30, r * 0.15),
+                         smooth=True, fill=shade(col, 1.28), outline="")
+        # visor
+        vx = x + math.cos(aim) * r * 0.16
+        vy = y - body_h * 0.20 + math.sin(aim) * r * 0.06
+        vw = body_w * 0.76
+        vh = body_h * 0.36
+        c.create_polygon(rounded_points(vx - vw / 2.0, vy - vh / 2.0, vx + vw / 2.0, vy + vh / 2.0, r * 0.34),
+                         smooth=True, fill="#8fc4f2", outline="")
+        c.create_polygon(rounded_points(vx - vw / 2.0 + 2, vy - vh / 2.0 + 2,
+                                        vx + vw / 2.0 - 2, vy + vh / 2.0 - 2, r * 0.3),
+                         smooth=True, fill=C_VISOR, outline="")
+        # ayaklar
+        fw = body_w * 0.24
+        c.create_polygon(rounded_points(x1 + body_w * 0.08, y2 - body_h * 0.04,
+                                        x1 + body_w * 0.08 + fw, y2 + body_h * 0.12, r * 0.12),
+                         smooth=True, fill=dark, outline="")
+        c.create_polygon(rounded_points(x2 - body_w * 0.08 - fw, y2 - body_h * 0.04,
+                                        x2 - body_w * 0.08, y2 + body_h * 0.12, r * 0.12),
+                         smooth=True, fill=dark, outline="")
+        if armed == "knife":
+            ca = math.cos(aim)
+            sa = math.sin(aim)
+            bx = x + ca * r * 0.95
+            by = y + sa * r * 0.95
+            c.create_line(x + ca * r * 0.45, y + sa * r * 0.45, bx, by,
+                          fill="#d9e0ef", width=max(3, r * 0.16))
+            c.create_polygon(bx, by,
+                             bx + ca * r * 0.55 - sa * r * 0.13,
+                             by + sa * r * 0.55 + ca * r * 0.13,
+                             bx + ca * r * 0.55 + sa * r * 0.13,
+                             by + sa * r * 0.55 - ca * r * 0.13,
+                             fill="#f4f8ff", outline="")
+        elif armed == "gun":
+            ca = math.cos(aim)
+            sa = math.sin(aim)
+            bx = x + ca * r * 1.2
+            by = y + sa * r * 1.2
+            c.create_line(x + ca * r * 0.4, y + sa * r * 0.4, bx, by,
+                          fill="#c3cee4", width=max(4, r * 0.2))
+            c.create_oval(bx - r * 0.15, by - r * 0.15, bx + r * 0.15, by + r * 0.15,
+                          fill=C_CYAN, outline="")
+
+    def draw_drone(self, c, x, y, r, aim=0.0, flash=0.0):
+        col = mix(DRONE_COLOR, "#ffffff", 0.7) if flash > 0 else DRONE_COLOR
+        c.create_oval(x - r * 1.25, y - r * 0.45, x - r * 0.35, y + r * 0.45,
+                      fill=DRONE_DARK, outline="")
+        c.create_oval(x + r * 0.35, y - r * 0.45, x + r * 1.25, y + r * 0.45,
+                      fill=DRONE_DARK, outline="")
+        c.create_oval(x - r, y - r, x + r, y + r, fill=col, outline="")
+        c.create_oval(x - r * 0.55, y - r * 0.55, x + r * 0.55, y + r * 0.55,
+                      fill=DRONE_DARK, outline="")
+        c.create_oval(x - r * 0.34, y - r * 0.34, x + r * 0.34, y + r * 0.34,
+                      fill="#ff6b6b", outline="")
+
+    def draw_bullet(self, c, b, ox=0.0, oy=0.0):
+        x = b.x + ox
+        y = b.y + oy
+        r = b.r
+        c.create_oval(x - r * 2.1, y - r * 2.1, x + r * 2.1, y + r * 2.1,
+                      fill=mix(C_BG, b.glow, 0.22), outline="")
+        c.create_oval(x - r, y - r, x + r, y + r, fill=b.color, outline="")
+        c.create_oval(x - r * 0.45, y - r * 0.45, x + r * 0.2, y + r * 0.2,
+                      fill=shade(b.color, 1.45), outline="")
+
+    def draw_hud(self, c):
+        panel(c, 14, 10, W - 14, 64, 14, C_PANEL, shadow=3)
+        p = self.player
+        # can
+        txt(c, 40, 37, "CAN", 10, C_DIM, anchor="w")
+        ratio = clamp(p.hp / p.maxhp, 0, 1)
+        col = C_OK if ratio > 0.5 else (C_WARN if ratio > 0.25 else C_DANGER)
+        bar(c, 74, 27, 190, 18, ratio, col)
+        txt(c, 200, 37, "%d" % int(max(0, p.hp)), 12, C_DIM, anchor="w")
+        # seviye / dalga
+        txt(c, 250, 26, "SEVIYE", 9, C_DIM, anchor="w")
+        txt(c, 250, 44, "%d/3" % (self.level_idx + 1), 14, C_TEXT, anchor="w")
+        txt(c, 322, 26, "DALGA", 9, C_DIM, anchor="w")
+        total_w = len(LEVELS[self.level_idx]["waves"])
+        txt(c, 322, 44, "%d/%d" % (self.wave_idx + 1, total_w), 14, C_TEXT, anchor="w")
+        # skor
+        txt(c, 400, 26, "SKOR", 9, C_DIM, anchor="w")
+        txt(c, 400, 45, "%d" % int(self.score), 18, C_GOLD, anchor="w")
+        # combo
+        if self.combo > 1:
+            txt(c, 520, 26, "COMBO", 9, C_DIM, anchor="w")
+            txt(c, 520, 45, "x%d" % self.combo, 16, C_ACCENT_HI, anchor="w")
+        # kalan dusman
+        alive = len([e for e in self.enemies if not e.dead])
+        txt(c, 600, 26, "DUSMAN", 9, C_DIM, anchor="w")
+        txt(c, 600, 45, "%d" % alive, 16, C_DANGER, anchor="w")
+        # guc kartlari
+        chips = []
+        if self.powerups["rapid"] > 0:
+            chips.append(("HIZ", C_WARN))
+        if self.powerups["spread"] > 0:
+            chips.append(("YAYILIM", C_CYAN))
+        if self.powerups["shield"] > 0:
+            chips.append(("KALKAN", C_OK))
+        cx = W - 34
+        for label, ccol in reversed(chips):
+            tw = 9 * len(label) + 20
+            x1 = cx - tw
+            c.create_polygon(rounded_points(x1, 18, cx, 40, 9), smooth=True,
+                             fill=mix(C_BG, ccol, 0.28), outline=ccol, width=1)
+            txt(c, (x1 + cx) / 2.0, 29, label, 9, ccol)
+            cx = x1 - 8
+        if self.settings["fps"]:
+            txt(c, W - 34, 54, "FPS %d" % int(self.fps), 10, C_DIM, anchor="e")
+
+    def draw_boss_bar(self, c):
+        boss = None
+        for e in self.enemies:
+            if e.kind == "boss" and not e.dead:
+                boss = e
+                break
+        if boss is None:
+            return
+        x1 = W / 2.0 - 230
+        x2 = W / 2.0 + 230
+        y = H - 34
+        txt(c, W / 2.0, y - 14, "IMPOSTOR BASKAN", 11, C_DANGER)
+        bar(c, x1, y, x2, 14, clamp(boss.hp / boss.maxhp, 0, 1), C_DANGER, "#1a1420", 7)
+
+    def draw_pickup(self, c, it, ox, oy):
+        x = it.x + ox
+        y = it.y + oy
+        bob = math.sin(it.t * 4.0) * 3.0
+        y += bob
+        kind = it.kind
+        if kind == "health":
+            col = C_OK
+            sym = "+"
+        elif kind == "rapid":
+            col = C_WARN
+            sym = ">>"
+        elif kind == "spread":
+            col = C_CYAN
+            sym = "<<<"
+        else:
+            col = C_GOLD
+            sym = "$"
+        c.create_oval(x - 16, y - 16, x + 16, y + 16, fill=mix(C_BG, col, 0.3), outline="")
+        c.create_polygon(rounded_points(x - 12, y - 12, x + 12, y + 12, 7),
+                         smooth=True, fill=mix(C_BG, col, 0.75), outline=col, width=2)
+        txt(c, x, y, sym, 11, col)
+
+    def draw_play(self, c, t):
+        self.draw_background(c, t)
+        ox = self.ox
+        oy = self.oy
+        for it in self.pickups:
+            self.draw_pickup(c, it, ox, oy)
+        for e in self.enemies:
+            if e.dead:
+                continue
+            x = e.x + ox
+            y = e.y + oy
+            if e.kind == "drone":
+                self.draw_drone(c, x, y, e.r, e.aim, e.flash)
+            else:
+                armed = "knife" if e.kind in ("imp", "boss") else "gun"
+                sc = 1.0
+                if e.kind == "boss":
+                    sc = 1.0
+                self.draw_actor(c, x, y, e.r, e.color, e.dark, e.aim,
+                                math.sin(e.bob * 6.0) * 1.6, e.flash, armed, sc)
+                if e.kind == "imp" and e.state == "windup":
+                    rr = e.r * (2.2 - e.timer)
+                    c.create_oval(x - rr, y - rr, x + rr, y + rr,
+                                  outline=C_DANGER, width=2)
+                if e.kind == "guard":
+                    c.create_oval(x - e.r * 1.5, y - e.r * 1.5, x + e.r * 1.5, y + e.r * 1.5,
+                                  outline=mix(C_BG, C_WARN, 0.45), width=1)
+        for q in self.particles:
+            a = clamp(q.life / q.max, 0, 1)
+            s = q.size * (0.4 + a * 0.8)
+            x = q.x + ox
+            y = q.y + oy
+            c.create_oval(x - s, y - s, x + s, y + s,
+                          fill=mix(C_BG, q.color, 0.35 + 0.65 * a), outline="")
+        for b in self.pbullets:
+            self.draw_bullet(c, b, ox, oy)
+        for b in self.ebullets:
+            self.draw_bullet(c, b, ox, oy)
+        p = self.player
+        blink = p.invuln > 0 and int(p.invuln * 18) % 2 == 0
+        if not blink:
+            self.draw_actor(c, p.x + ox, p.y + oy, p.r, P_COLOR, P_DARK, p.aim,
+                            math.sin(p.bob * 9.0) * 1.8, 0.0, "gun", 1.0)
+            if p.muzzle > 0:
+                ca = math.cos(p.aim)
+                sa = math.sin(p.aim)
+                mx = p.x + ox + ca * 34
+                my = p.y + oy + sa * 34
+                c.create_oval(mx - 9, my - 9, mx + 9, my + 9, fill=C_WARN, outline="")
+                c.create_oval(mx - 4, my - 4, mx + 4, my + 4, fill="#fff6d6", outline="")
+        self.draw_hud(c)
+        self.draw_boss_bar(c)
+        if self.banner_t > 0:
+            a = clamp(self.banner_t, 0, 1)
+            y = PLAY_TOP + 60
+            w = 360
+            c.create_polygon(rounded_points(W / 2.0 - w / 2.0, y - 26, W / 2.0 + w / 2.0, y + 26, 12),
+                             smooth=True, fill=mix(C_BG, C_PANEL, 0.9 * a), outline="")
+            txt(c, W / 2.0, y, self.banner, 18, mix(C_BG, C_TEXT, a))
+
+    def draw_menu(self, c, t):
+        self.draw_background(c, t)
+        # dekoratif karakterler
+        self.draw_actor(c, 132, 128, 34, P_COLOR, P_DARK, 0.4, math.sin(t * 2.0) * 3.0,
+                        0.0, "gun", 1.0)
+        self.draw_actor(c, W - 132, 128, 34, IMP_COLOR, IMP_DARK, 3.5,
+                        math.sin(t * 2.4 + 1.0) * 3.0, 0.0, "knife", 1.0)
+        txt(c, W / 2.0, 96, "AMONG US 2D", 46, C_TEXT)
+        txt(c, W / 2.0, 150, "SHOOT 'EM UP  -  3 SEVİYE  -  SKOR TABLOSU", 13, C_DIM)
+        c.create_polygon(rounded_points(W / 2.0 - 190, 168, W / 2.0 + 190, 172, 2),
+                         smooth=True, fill=C_ACCENT, outline="")
+        # kontrol paneli
+        panel(c, 40, 470, 400, 586, 12, C_PANEL, shadow=3)
+        txt(c, 58, 490, "KONTROLLER", 12, C_ACCENT_HI, anchor="w")
+        lines = ("HAREKET : W A S D  /  YON TUSLARI",
+                 "NIŞAN   : MOUSE     ATES : SOL TIK / SPACE",
+                 "DURAKLAT: ESC        MENU : ENTER")
+        for i, ln in enumerate(lines):
+            txt(c, 58, 516 + i * 20, ln, 11, C_DIM, anchor="w")
+        # skor tablosu
+        panel(c, 560, 470, W - 40, 586, 12, C_PANEL, shadow=3)
+        txt(c, 578, 490, "SKOR TABLOSU", 12, C_GOLD, anchor="w")
+        if not self.scores:
+            txt(c, 578, 520, "HENUZ KAYIT YOK", 11, C_DIM, anchor="w")
+        else:
+            for i, (sc, nm) in enumerate(self.scores[:5]):
+                yy = 512 + i * 17
+                txt(c, 578, yy, "%d." % (i + 1), 11, C_DIM, anchor="w")
+                txt(c, 602, yy, nm, 11, C_TEXT, anchor="w")
+                txt(c, W - 58, yy, "%d" % sc, 11, C_GOLD, anchor="e")
+
+    def draw_settings(self, c, t):
+        self.draw_background(c, t)
+        txt(c, W / 2.0, 78, "AYARLAR", 34, C_TEXT)
+        c.create_polygon(rounded_points(W / 2.0 - 120, 112, W / 2.0 + 120, 116, 2),
+                         smooth=True, fill=C_ACCENT, outline="")
+        txt(c, W / 2.0, 548, "SECENEK DEGISTIRMEK ICIN SATIRA TIKLA", 11, C_DIM)
+
+    def draw_pause(self, c, t):
+        self.draw_play(c, t)
+        c.create_rectangle(0, 0, W, H, fill=C_SHADOW, stipple="gray50", outline="")
+        panel(c, W / 2.0 - 200, 96, W / 2.0 + 200, 480, 18, C_PANEL, shadow=4,
+              outline=C_ACCENT, ow=2)
+        txt(c, W / 2.0, 140, "DURAKLATILDI", 30, C_TEXT)
+        txt(c, W / 2.0, 170, "SEVIYE %d  -  DALGA %d  -  SKOR %d" %
+            (self.level_idx + 1, self.wave_idx + 1, int(self.score)), 12, C_DIM)
+
+    def draw_levelclear(self, c, t):
+        self.draw_play(c, t)
+        c.create_rectangle(0, 0, W, H, fill=C_SHADOW, stipple="gray50", outline="")
+        panel(c, W / 2.0 - 220, 150, W / 2.0 + 220, 480, 18, C_PANEL, shadow=4,
+              outline=C_OK, ow=2)
+        txt(c, W / 2.0, 196, "SEVIYE TAMAMLANDI", 26, C_OK)
+        txt(c, W / 2.0, 236, LEVELS[self.level_idx]["name"], 14, C_TEXT)
+        txt(c, W / 2.0, 276, "BONUS", 11, C_DIM)
+        txt(c, W / 2.0, 296, "+%d" % self.last_bonus, 22, C_GOLD)
+        txt(c, W / 2.0, 330, "SKOR", 11, C_DIM)
+        txt(c, W / 2.0, 350, "%d" % int(self.score), 24, C_TEXT)
+
+    def draw_gameover(self, c, t):
+        if self.state == "victory":
+            self.draw_play(c, t)
+        c.create_rectangle(0, 0, W, H, fill=C_SHADOW, stipple="gray50", outline="")
+        panel(c, W / 2.0 - 290, 60, W / 2.0 + 290, 540, 18, C_PANEL, shadow=4,
+              outline=C_DANGER if self.state != "victory" else C_GOLD, ow=2)
+        if self.state == "victory":
+            txt(c, W / 2.0, 104, "ZAFER!", 34, C_GOLD)
+            txt(c, W / 2.0, 140, "TUM BOLGELER TEMIZLENDI", 13, C_TEXT)
+        else:
+            txt(c, W / 2.0, 104, "GAME OVER", 32, C_DANGER)
+            txt(c, W / 2.0, 140, "SEVIYE %d  -  DALGA %d" %
+                (self.level_idx + 1, self.wave_idx + 1), 12, C_DIM)
+        txt(c, W / 2.0, 178, "SKOR", 11, C_DIM)
+        txt(c, W / 2.0, 200, "%d" % int(self.pending_score if self.pending_score is not None else self.score),
+            30, C_GOLD)
+        best = self.scores[0][0] if self.scores else 0
+        txt(c, W / 2.0, 224, "EN IYI SKOR: %d" % best, 12, C_DIM)
+        # skor tablosu
+        panel(c, W / 2.0 - 270, 240, W / 2.0 + 270, 400, 12, C_BG2, shadow=0)
+        txt(c, W / 2.0, 258, "SKOR TABLOSU", 12, C_GOLD)
+        rows = list(self.scores[:6])
+        if self.pending_score is not None:
+            rows = [(self.pending_score, (self.name_input or "ISIM GIR"))] + rows
+        if not rows:
+            txt(c, W / 2.0, 290, "KAYIT YOK", 12, C_DIM)
+        for i, (sc, nm) in enumerate(rows[:6]):
+            y = 282 + i * 19
+            txt(c, W / 2.0 - 250, y, "%d." % (i + 1), 11, C_DIM, anchor="w")
+            txt(c, W / 2.0 - 224, y, str(nm)[:12], 11, C_TEXT, anchor="w")
+            txt(c, W / 2.0 + 250, y, "%d" % sc, 11, C_GOLD, anchor="e")
+        # isim alani
+        fx1 = W / 2.0 - 230
+        fx2 = W / 2.0 + 230
+        panel(c, fx1, 412, fx2, 456, 10, C_BG2, shadow=0,
+              outline=C_ACCENT if self.name_active else "#39415c", ow=2)
+        txt(c, fx1 + 14, 434, "ISIM", 11, C_DIM, anchor="w")
+        val = self.name_input + ("_" if self.name_active else "")
+        txt(c, fx2 - 14, 434, val if val else "ISMINI YAZ", 13,
+            C_TEXT if self.name_input else C_DIM, anchor="e")
+        txt(c, W / 2.0, 562, "ENTER : KAYDET   -   ESC : ANA MENU", 11, C_DIM)
+
+    # ---------------------------------------------------------------- dongu
+    def update(self, dt):
+        if self.state == "play":
+            self.update_play(dt)
+
+    def draw(self):
+        c = self.canvas
+        c.delete("all")
+        t = self.time_acc
+        if self.state == "menu":
+            self.draw_menu(c, t)
+        elif self.state == "settings":
+            self.draw_settings(c, t)
+        elif self.state == "play":
+            self.draw_play(c, t)
+        elif self.state == "pause":
+            self.draw_pause(c, t)
+        elif self.state == "levelclear":
+            self.draw_levelclear(c, t)
+        elif self.state in ("gameover", "victory"):
+            self.draw_gameover(c, t)
+        for i, b in enumerate(self.buttons):
+            b.draw(c, self.hover_idx == i)
+
+    def loop(self):
+        self.after_id = None
+        try:
+            now = time.time()
+            dt = now - self.last_t
+            self.last_t = now
+            if dt > 0.05:
+                dt = 0.05
+            if dt < 0:
+                dt = 0
+            self.time_acc += dt
+            self.update(dt)
+            self.draw()
+            self.frames += 1
+            if now - self.fps_t >= 0.5:
+                self.fps = self.frames / (now - self.fps_t)
+                self.frames = 0
+                self.fps_t = now
+        except Exception:
+            traceback.print_exc()
+        finally:
+            if self.running:
+                try:
+                    self.after_id = self.root.after(LOOP_MS, self.loop)
+                except Exception:
+                    traceback.print_exc()
+                    self.running = False
+
+    def start(self):
+        self.last_t = time.time()
+        self.fps_t = self.last_t
+        try:
+            self.after_id = self.root.after(LOOP_MS, self.loop)
+        except Exception:
+            traceback.print_exc()
+
+
+# ------------------------------------------------------------------- giris
+def play(root):
+    """Oyunu baslatir. root: tk.Tk() penceresi."""
+    app = App(root)
+    app.start()
+    return app
+
+
+if __name__ == "__main__":
+    _root = tk.Tk()
+    _root.withdraw()
+    play(_root)
+    _root.mainloop()
