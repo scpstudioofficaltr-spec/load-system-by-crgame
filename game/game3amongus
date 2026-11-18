@@ -1,1 +1,357 @@
+# -*- coding: utf-8 -*-
+"""AMONG US 2D - Shoot 'em Up
+Tek dosya, sadece standart kutuphane (tkinter, random, math, time).
+Giris noktasi: play(root)
+"""
 
+import math
+import random
+import time
+import traceback
+import tkinter as tk
+
+# ------------------------------------------------------------------ sabitler
+W, H = 960, 620
+PLAY_TOP = 78
+LOOP_MS = 16
+SCORE_FILE = "among_us_2d_scores.txt"
+
+C_BG = "#12141f"
+C_BG2 = "#181b29"
+C_PANEL = "#1e2333"
+C_PANEL_HI = "#2a3145"
+C_SHADOW = "#06080f"
+C_TEXT = "#e9edf8"
+C_DIM = "#8b93ad"
+C_ACCENT = "#3d7dff"
+C_ACCENT_HI = "#5d94ff"
+C_DANGER = "#ff4d5e"
+C_WARN = "#ffb020"
+C_OK = "#37d67a"
+C_CYAN = "#42d9f5"
+C_GOLD = "#ffd24a"
+C_VISOR = "#cfe8ff"
+C_INK = "#0b0e18"
+
+P_COLOR = "#3d7dff"
+P_DARK = "#2550b8"
+IMP_COLOR = "#e05252"
+IMP_DARK = "#9c2f2f"
+GUARD_COLOR = "#efa93c"
+GUARD_DARK = "#a8731c"
+DRONE_COLOR = "#8b5cf0"
+DRONE_DARK = "#5b34a8"
+BOSS_COLOR = "#c22647"
+BOSS_DARK = "#7d1229"
+
+ENEMY_STATS = {
+    "imp": {"r": 17, "hp": 34, "speed": 112, "dmg": 12, "score": 100,
+            "color": IMP_COLOR, "dark": IMP_DARK},
+    "guard": {"r": 18, "hp": 54, "speed": 84, "dmg": 10, "score": 180,
+              "color": GUARD_COLOR, "dark": GUARD_DARK},
+    "drone": {"r": 12, "hp": 16, "speed": 172, "dmg": 10, "score": 60,
+              "color": DRONE_COLOR, "dark": DRONE_DARK},
+    "boss": {"r": 44, "hp": 900, "speed": 56, "dmg": 20, "score": 3000,
+             "color": BOSS_COLOR, "dark": BOSS_DARK},
+}
+
+LEVELS = [
+    {"name": "SEKTOR 1 - KARANTINA", "waves": [
+        [("drone", 5, 0.70)],
+        [("imp", 6, 0.85), ("guard", 2, 1.80)],
+        [("drone", 7, 0.50), ("imp", 4, 1.00), ("guard", 2, 1.70)],
+    ]},
+    {"name": "SEKTOR 2 - MOTOR DEKI", "waves": [
+        [("imp", 8, 0.70), ("drone", 4, 0.60)],
+        [("guard", 4, 1.40), ("drone", 8, 0.40)],
+        [("imp", 8, 0.60), ("guard", 4, 1.20), ("drone", 6, 0.50)],
+    ]},
+    {"name": "SEKTOR 3 - IMPOSTOR KARARGAHI", "waves": [
+        [("imp", 10, 0.50), ("guard", 5, 1.10), ("drone", 8, 0.40)],
+        [("imp", 10, 0.50), ("guard", 6, 1.00), ("drone", 10, 0.35)],
+        [("boss", 1, 1.00)],
+    ]},
+]
+
+DIFFS = [
+    {"name": "KOLAY", "hp": 0.78, "spd": 0.86, "dmg": 0.65, "score": 0.80},
+    {"name": "NORMAL", "hp": 1.00, "spd": 1.00, "dmg": 1.00, "score": 1.00},
+    {"name": "ZOR", "hp": 1.28, "spd": 1.12, "dmg": 1.32, "score": 1.30},
+]
+
+F = "Helvetica"
+
+
+# --------------------------------------------------------------- renk araclar
+def _hx(c):
+    return int(c[1:3], 16), int(c[3:5], 16), int(c[5:7], 16)
+
+
+def mix(a, b, t):
+    ar, ag, ab = _hx(a)
+    br, bg, bb = _hx(b)
+    t = 0.0 if t < 0 else (1.0 if t > 1 else t)
+    return "#%02x%02x%02x" % (int(ar + (br - ar) * t),
+                               int(ag + (bg - ag) * t),
+                               int(ab + (bb - ab) * t))
+
+
+def shade(c, f):
+    if f <= 1.0:
+        return mix(c, "#000000", 1.0 - f)
+    return mix(c, "#ffffff", min(1.0, f - 1.0))
+
+
+def clamp(v, lo, hi):
+    if v < lo:
+        return lo
+    if v > hi:
+        return hi
+    return v
+
+
+def dist2(ax, ay, bx, by):
+    dx = ax - bx
+    dy = ay - by
+    return dx * dx + dy * dy
+
+
+# ------------------------------------------------------------- cizim araclari
+def rounded_points(x1, y1, x2, y2, r, steps=6):
+    r = max(0.0, min(r, (x2 - x1) / 2.0, (y2 - y1) / 2.0))
+    pts = []
+    specs = ((x2 - r, y1 + r, -90, 0),
+             (x2 - r, y2 - r, 0, 90),
+             (x1 + r, y2 - r, 90, 180),
+             (x1 + r, y1 + r, 180, 270))
+    for cx, cy, a0, a1 in specs:
+        for i in range(steps + 1):
+            a = math.radians(a0 + (a1 - a0) * i / steps)
+            pts.append(cx + r * math.cos(a))
+            pts.append(cy + r * math.sin(a))
+    return pts
+
+
+def soft_shadow(c, x1, y1, x2, y2, r, layers=3, base=C_SHADOW, bg=C_BG):
+    for i in range(layers, 0, -1):
+        o = i * 2.5
+        col = mix(base, bg, 1.0 - (i - 1) / float(layers) * 0.72)
+        c.create_polygon(rounded_points(x1 - o, y1 - o + 3, x2 + o, y2 + o + 3, r + o),
+                         smooth=True, fill=col, outline="")
+
+
+def panel(c, x1, y1, x2, y2, r=14, fill=C_PANEL, shadow=3, outline=None, ow=2):
+    if shadow:
+        soft_shadow(c, x1, y1, x2, y2, r, shadow)
+    c.create_polygon(rounded_points(x1, y1, x2, y2, r), smooth=True, fill=fill,
+                     outline=(outline or ""), width=(ow if outline else 0))
+
+
+def txt(c, x, y, s, size=12, color=C_TEXT, anchor="center", bold=True):
+    c.create_text(x, y, text=s, fill=color,
+                  font=(F, size, "bold" if bold else "normal"), anchor=anchor)
+
+
+def bar(c, x1, y, x2, h, ratio, fill=C_OK, bg="#141826", r=None):
+    if r is None:
+        r = h / 2.0
+    c.create_polygon(rounded_points(x1, y, x2, y + h, r), smooth=True, fill=bg, outline="")
+    w = (x2 - x1) * max(0.0, min(1.0, ratio))
+    if w > 2:
+        c.create_polygon(rounded_points(x1, y, x1 + w, y + h, r), smooth=True, fill=fill, outline="")
+        if w > 14:
+            c.create_polygon(rounded_points(x1 + 2, y + 2, x1 + w - 2, y + h * 0.45, r * 0.6),
+                             smooth=True, fill=shade(fill, 1.22), outline="")
+
+
+# ------------------------------------------------------------------- varliklar
+class Bullet(object):
+    __slots__ = ("x", "y", "vx", "vy", "r", "dmg", "color", "glow",
+                 "life", "friendly", "alive", "pierce", "trail")
+
+    def __init__(self, x, y, vx, vy, r, dmg, color, friendly=False,
+                 glow=None, pierce=0, life=3.0):
+        self.x = x
+        self.y = y
+        self.vx = vx
+        self.vy = vy
+        self.r = r
+        self.dmg = dmg
+        self.color = color
+        self.glow = glow or color
+        self.life = life
+        self.friendly = friendly
+        self.alive = True
+        self.pierce = pierce
+        self.trail = []
+
+
+class Particle(object):
+    __slots__ = ("x", "y", "vx", "vy", "life", "max", "size", "color", "drag")
+
+    def __init__(self, x, y, vx, vy, life, size, color, drag=2.0):
+        self.x = x
+        self.y = y
+        self.vx = vx
+        self.vy = vy
+        self.life = life
+        self.max = life
+        self.size = size
+        self.color = color
+        self.drag = drag
+
+
+class Pickup(object):
+    __slots__ = ("x", "y", "kind", "t", "vy")
+
+    def __init__(self, x, y, kind):
+        self.x = x
+        self.y = y
+        self.kind = kind
+        self.t = 0.0
+        self.vy = 0.0
+
+
+class Enemy(object):
+    def __init__(self, kind, x, y):
+        st = ENEMY_STATS[kind]
+        self.kind = kind
+        self.x = x
+        self.y = y
+        self.vx = 0.0
+        self.vy = 0.0
+        self.ax = 0.0
+        self.ay = 0.0
+        self.r = st["r"]
+        self.hp = st["hp"]
+        self.maxhp = st["hp"]
+        self.speed = st["speed"]
+        self.dmg = st["dmg"]
+        self.score = st["score"]
+        self.color = st["color"]
+        self.dark = st["dark"]
+        self.flash = 0.0
+        self.phase = random.random() * math.tau
+        self.state = "chase"
+        self.timer = 0.0
+        self.dash_cd = random.uniform(0.8, 2.2)
+        self.strafe = random.choice((-1, 1))
+        self.strafe_cd = random.uniform(0.9, 2.0)
+        self.fire_cd = random.uniform(0.7, 1.8)
+        self.shoot_n = 1
+        self.dead = False
+        self.aim = 0.0
+        self.bob = 0.0
+
+
+class Player(object):
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+        self.vx = 0.0
+        self.vy = 0.0
+        self.r = 15
+        self.hp = 100.0
+        self.maxhp = 100.0
+        self.aim = 0.0
+        self.invuln = 0.0
+        self.bob = 0.0
+        self.muzzle = 0.0
+
+
+# ---------------------------------------------------------------- arayuz parca
+class Btn(object):
+    def __init__(self, x, y, w, h, label, action, kind="primary", size=17, sub=""):
+        self.x = x
+        self.y = y
+        self.w = w
+        self.h = h
+        self.label = label
+        self._action = action
+        self.kind = kind
+        self.size = size
+        self.sub = sub
+
+    def contains(self, x, y):
+        return self.x <= x <= self.x + self.w and self.y <= y <= self.y + self.h
+
+    def click(self, x, y):
+        if self.contains(x, y):
+            if self._action:
+                self._action()
+
+    def draw(self, c, hover=False):
+        off = -2 if hover else 0
+        x1 = self.x
+        y1 = self.y + off
+        x2 = self.x + self.w
+        y2 = self.y + self.h + off
+        base = {"primary": C_ACCENT, "danger": C_DANGER, "ghost": C_PANEL_HI,
+                "gold": C_GOLD, "ok": C_OK}.get(self.kind, C_ACCENT)
+        ink = C_INK if self.kind in ("primary", "danger", "gold", "ok") else C_TEXT
+        if hover:
+            base = shade(base, 1.16)
+        soft_shadow(c, x1, y1, x2, y2, 14, 3)
+        c.create_polygon(rounded_points(x1, y1, x2, y2, 14), smooth=True, fill=base, outline="")
+        c.create_polygon(rounded_points(x1 + 10, y1 + 3, x2 - 10, y1 + 6, 2),
+                         smooth=True, fill=shade(base, 1.28), outline="")
+        ty = (y1 + y2) / 2.0 - (7 if self.sub else 0)
+        txt(c, (x1 + x2) / 2.0, ty, self.label, self.size, ink)
+        if self.sub:
+            txt(c, (x1 + x2) / 2.0, (y1 + y2) / 2.0 + 13, self.sub, 10, mix(ink, C_BG, 0.4))
+
+
+class SettingRow(object):
+    def __init__(self, x, y, w, h, label, options, index, on_change):
+        self.x = x
+        self.y = y
+        self.w = w
+        self.h = h
+        self.label = label
+        self.options = options
+        self.index = index
+        self.on_change = on_change
+
+    def contains(self, x, y):
+        return self.x <= x <= self.x + self.w and self.y <= y <= self.y + self.h
+
+    def click(self, x, y):
+        if not self.contains(x, y):
+            return
+        left_x = self.x + self.w - 104
+        right_x = self.x + self.w - 44
+        if left_x <= x <= left_x + 34:
+            self.index = (self.index - 1) % len(self.options)
+        elif right_x <= x <= right_x + 34:
+            self.index = (self.index + 1) % len(self.options)
+        else:
+            self.index = (self.index + 1) % len(self.options)
+        if self.on_change:
+            self.on_change(self.index)
+
+    def draw(self, c, hover=False):
+        x1 = self.x
+        y1 = self.y
+        x2 = self.x + self.w
+        y2 = self.y + self.h
+        panel(c, x1, y1, x2, y2, 12, C_PANEL if not hover else C_PANEL_HI, shadow=2)
+        txt(c, x1 + 22, (y1 + y2) / 2.0, self.label, 15, C_TEXT, anchor="w")
+        txt(c, x2 - 152, (y1 + y2) / 2.0, self.options[self.index], 15, C_CYAN)
+        lx = x2 - 96
+        rx = x2 - 36
+        for cx, sym in ((lx, "<"), (rx, ">")):
+            c.create_polygon(rounded_points(cx - 16, (y1 + y2) / 2.0 - 14, cx + 16,
+                                           (y1 + y2) / 2.0 + 14, 8),
+                             smooth=True, fill=C_PANEL_HI, outline="")
+            txt(c, cx, (y1 + y2) / 2.0, sym, 14, C_TEXT)
+
+
+class NameField(object):
+    def __init__(self, x, y, w, h, on_click):
+        self.x = x
+        self.y = y
+        self.w = w
+        self.h = h
+        self.on_click = on_click
+
+    def contains(self, x, y):
