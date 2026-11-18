@@ -18,14 +18,22 @@ LINE = "#e5e5e5"
 
 BASE = "https://raw.githubusercontent.com/scpstudioofficaltr-spec/load-system-by-crgame/refs/heads/main/"
 LIST_URLS = [BASE + "game/list", BASE + "oyun/list"]
+APP_LIST_URLS = [BASE + "app/list"]
+APP_FILES_BASE = BASE + "app/"
 APP_URL = BASE + "apppy"
 
 TMP = tempfile.gettempdir()
 LOG_PATH = os.path.join(TMP, "crgame_game.log")
+APP_LOG_PATH = os.path.join(TMP, "crgame_app.log")
 RUNNER_PATH = os.path.join(TMP, "crgame_runner.py")
+APPS_DIR = os.path.join(TMP, "crgame_apps")
 
 FALLBACK = [{"name": "Örnek Oyun", "file": "ornek_oyun.py", "url": None,
              "desc": "Liste alınamadı. Bu bir örnek oyundur."}]
+
+APP_FALLBACK = [{"name": "app-load-system", "file": "app-load-system.pyw",
+                 "slug": "app-load-system", "url": APP_FILES_BASE + "app-load-system",
+                 "desc": "Load System uygulaması."}]
 
 # Oyunu ayrı bir uygulama (ayrı süreç) olarak açan küçük program
 RUNNER = r'''
@@ -96,6 +104,26 @@ def parse_line(line):
             "url": url, "desc": desc}
 
 
+def parse_app_line(line):
+    """isim | açıklama | raw url   (açıklama ve url isteğe bağlı).
+    Url yoksa app/ klasöründeki aynı isimli dosya kullanılır."""
+    parts = [p.strip() for p in line.split("|")]
+    url = None
+    if len(parts) > 1 and parts[-1].lower().startswith("http"):
+        url = parts.pop()
+    raw = parts[0]
+    name = raw
+    for ext in (".pyw", ".py"):
+        if name.lower().endswith(ext):
+            name = name[:-len(ext)]
+            break
+    slug = re.sub(r"[^A-Za-z0-9_-]", "_", name) or "app"
+    if not url:
+        url = APP_FILES_BASE + raw.replace(" ", "%20")
+    desc = parts[1] if len(parts) > 1 and parts[1] else "Bu uygulama için henüz açıklama eklenmedi."
+    return {"name": name, "file": slug + ".pyw", "slug": slug, "url": url, "desc": desc}
+
+
 def fetch_games():
     for u in LIST_URLS:
         try:
@@ -110,6 +138,22 @@ def fetch_games():
         if games:
             return games
     return FALLBACK
+
+
+def fetch_apps():
+    for u in APP_LIST_URLS:
+        try:
+            text = fetch_bytes(u, 8).decode("utf-8", errors="ignore")
+        except Exception:
+            continue
+        apps = []
+        for line in text.splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                apps.append(parse_app_line(line))
+        if apps:
+            return apps
+    return APP_FALLBACK
 
 
 def find_icon():
@@ -143,13 +187,48 @@ def start_process(game, code):
         log.close()
 
 
-def log_tail():
+def app_path(app):
+    return os.path.join(APPS_DIR, app["slug"] + ".pyw")
+
+
+def install_app(app):
+    """Uygulamayı indirir ve .pyw olarak diske kaydeder."""
+    data = fetch_bytes(app["url"], 30)
+    if not data.strip():
+        raise ValueError("indirilen dosya boş")
+    os.makedirs(APPS_DIR, exist_ok=True)
+    with open(app_path(app), "wb") as f:
+        f.write(data)
+
+
+def launch_app(app):
+    """Kaydedilmiş .pyw dosyasını pythonw ile (konsolsuz) çalıştırır."""
+    if getattr(sys, "frozen", False):
+        raise RuntimeError("Uygulamayı açmak için programı Python ile çalıştır (exe olmaz).")
+    exe = sys.executable
+    pyw = os.path.join(os.path.dirname(exe), "pythonw.exe")
+    if os.name == "nt" and os.path.exists(pyw):
+        exe = pyw
+    log = open(APP_LOG_PATH, "w")
+    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     try:
-        with open(LOG_PATH, encoding="utf-8", errors="ignore") as f:
+        return subprocess.Popen([exe, app_path(app)], stdout=log, stderr=log,
+                                creationflags=flags, cwd=APPS_DIR)
+    finally:
+        log.close()
+
+
+def tail_of(path):
+    try:
+        with open(path, encoding="utf-8", errors="ignore") as f:
             lines = [l.strip() for l in f.read().splitlines() if l.strip()]
         return lines[-1][:150] if lines else "unknown error"
     except OSError:
         return "unknown error"
+
+
+def log_tail():
+    return tail_of(LOG_PATH)
 
 
 def build(root):
@@ -158,8 +237,8 @@ def build(root):
     for w in root.winfo_children():
         w.destroy()
 
-    state = {"anim": None, "games": None, "proc": None, "game": None,
-             "user_closed": False, "dead": False}
+    state = {"anim": None, "games": None, "apps": None, "proc": None, "game": None,
+             "app_procs": {}, "user_closed": False, "dead": False}
     q = queue.Queue()
 
     def proc_alive():
@@ -203,6 +282,9 @@ def build(root):
                     disabledforeground="#bbbbbb",
                     command=lambda: do_update())
     upd.pack(side="right", padx=(8, 24))
+    apps_btn = tk.Label(nav, text="Apps", fg=RED, bg=WHITE,
+                        font=("Segoe UI", 11, "bold"), cursor="hand2")
+    apps_btn.pack(side="right", padx=16)
     home_btn = tk.Label(nav, text="Ana Menü", fg=DARK, bg=WHITE,
                         font=("Segoe UI", 11), cursor="hand2")
     home_btn.pack(side="right", padx=16)
@@ -333,13 +415,13 @@ def build(root):
             bg(fetch_games, lambda res: fill(FALLBACK if isinstance(res, Exception) else res))
 
     # ---------- YÜKLEME ANİMASYONU ----------
-    def show_loading(game):
+    def show_spinner(text, after_done, frames=60):
         clear()
         box = tk.Frame(page, bg=WHITE)
         box.pack(pady=(140, 0))
         c = tk.Canvas(box, width=90, height=90, bg=WHITE, highlightthickness=0)
         c.pack()
-        tk.Label(box, text=f"{game['name']} yükleniyor...", fg=DARK, bg=WHITE,
+        tk.Label(box, text=text, fg=DARK, bg=WHITE,
                  font=("Segoe UI", 14)).pack(pady=(20, 0))
         c.create_oval(10, 10, 80, 80, outline=LINE, width=6)
         arc = c.create_arc(10, 10, 80, 80, start=0, extent=100,
@@ -349,12 +431,15 @@ def build(root):
         def spin():
             ticks["n"] += 1
             c.itemconfigure(arc, start=(ticks["n"] * 12) % 360)
-            if ticks["n"] >= 60:
-                show_game(game)
+            if ticks["n"] >= frames:
+                after_done()
                 return
             state["anim"] = root.after(33, spin)
 
         spin()
+
+    def show_loading(game):
+        show_spinner(f"{game['name']} yükleniyor...", lambda: show_game(game))
 
     # ---------- OYUN SAYFASI ----------
     def show_game(game):
@@ -459,7 +544,159 @@ def build(root):
         close_btn.config(command=stop)
         tick()
 
+    # ---------- APPS: yükleme animasyonu -> uygulama listesi ----------
+    def open_apps():
+        show_spinner("Apps yükleniyor...", show_apps, frames=45)
+
+    def show_apps():
+        clear()
+        hero = tk.Frame(page, bg=WHITE)
+        hero.pack(fill="x", padx=60, pady=(50, 20))
+        tk.Label(hero, text="Uygulamalar", fg=RED, bg=WHITE,
+                 font=("Segoe UI", 12, "bold")).pack(anchor="w")
+        tk.Label(hero, text="Apps", fg=DARK, bg=WHITE,
+                 font=("Segoe UI", 38, "bold")).pack(anchor="w", pady=(6, 0))
+        tk.Label(hero, text="Bir uygulama seç, yükle ve çalıştır.", fg=GREY, bg=WHITE,
+                 font=("Segoe UI", 13)).pack(anchor="w", pady=(10, 0))
+
+        grid = tk.Frame(page, bg=WHITE)
+        grid.pack(fill="x", padx=50, pady=20)
+        status = tk.Label(page, text="Uygulama listesi yükleniyor...", fg=GREY, bg=WHITE,
+                          font=("Segoe UI", 12))
+        status.pack(pady=10)
+
+        def fill(apps):
+            try:
+                if not grid.winfo_exists():
+                    return
+                status.destroy()
+            except tk.TclError:
+                return
+            state["apps"] = apps
+            cols = 3
+            for i, a in enumerate(apps):
+                card = tk.Frame(grid, bg=LIGHT, highlightbackground=LINE,
+                                highlightthickness=1, cursor="hand2")
+                card.grid(row=i // cols, column=i % cols, padx=10, pady=10, sticky="nsew")
+                grid.grid_columnconfigure(i % cols, weight=1, uniform="c")
+                tk.Frame(card, bg=RED, height=4).pack(fill="x")
+                t = tk.Label(card, text=a["name"], fg=DARK, bg=LIGHT,
+                             font=("Segoe UI", 15, "bold"), cursor="hand2")
+                t.pack(anchor="w", padx=20, pady=(20, 6))
+                f = tk.Label(card, text=a["file"], fg=GREY, bg=LIGHT,
+                             font=("Consolas", 10), cursor="hand2")
+                f.pack(anchor="w", padx=20, pady=(0, 24))
+                for w in (card, t, f):
+                    w.bind("<Button-1>", lambda e, a=a: show_app(a))
+
+        if state["apps"] is not None:
+            fill(state["apps"])
+        else:
+            bg(fetch_apps, lambda res: fill(APP_FALLBACK if isinstance(res, Exception) else res))
+
+    # ---------- APP SAYFASI (Install -> Loading... -> çalışır) ----------
+    def show_app(app):
+        clear()
+        box = tk.Frame(page, bg=WHITE)
+        box.pack(fill="x", padx=60, pady=(70, 20))
+        tk.Label(box, text=app["name"], fg=DARK, bg=WHITE,
+                 font=("Segoe UI", 34, "bold")).pack(anchor="w")
+        tk.Label(box, text=app["file"], fg=GREY, bg=WHITE,
+                 font=("Consolas", 11)).pack(anchor="w", pady=(4, 0))
+        tk.Label(box, text=app["desc"], fg=GREY, bg=WHITE, font=("Segoe UI", 13),
+                 wraplength=800, justify="left").pack(anchor="w", pady=(20, 28))
+
+        row = tk.Frame(box, bg=WHITE)
+        row.pack(anchor="w")
+        main_btn = tk.Button(row, text="Install", fg=WHITE, bg=RED, activebackground="#b80500",
+                             activeforeground=WHITE, disabledforeground="#ffd0ce",
+                             relief="flat", font=("Segoe UI", 13, "bold"),
+                             padx=36, pady=12, cursor="hand2")
+        main_btn.pack(side="left")
+        close_btn = tk.Button(row, text="Close", fg=DARK, bg=WHITE, activebackground=LIGHT,
+                              disabledforeground="#bbbbbb", relief="solid", bd=1,
+                              font=("Segoe UI", 13, "bold"), padx=30, pady=11, cursor="hand2")
+        close_btn.pack(side="left", padx=(12, 0))
+        msg = tk.Label(box, text="", fg=GREY, bg=WHITE, font=("Segoe UI", 11),
+                       wraplength=800, justify="left")
+        msg.pack(anchor="w", pady=(12, 0))
+        tk.Button(box, text="← Geri", fg=DARK, bg=WHITE, relief="flat",
+                  font=("Segoe UI", 11), cursor="hand2",
+                  command=show_apps).pack(anchor="w", pady=(20, 0))
+
+        ui = {"busy": False}
+
+        def alive():
+            p = state["app_procs"].get(app["name"])
+            return p is not None and p.poll() is None
+
+        def sync():
+            if alive():
+                main_btn.config(text="Running", state="disabled")
+                close_btn.config(state="normal")
+                msg.config(text="App is running.", fg=GREY)
+            elif ui["busy"]:
+                main_btn.config(text="Loading...", state="disabled")
+                close_btn.config(state="disabled")
+            else:
+                installed = os.path.exists(app_path(app))
+                main_btn.config(text="Open" if installed else "Install", state="normal")
+                close_btn.config(state="disabled")
+
+        def start():
+            if alive() or ui["busy"]:
+                return
+            ui["busy"] = True
+            msg.config(text="", fg=GREY)
+            sync()
+
+            def work():
+                if not os.path.exists(app_path(app)):
+                    install_app(app)
+                time.sleep(0.8)                 # "Loading..." görünsün
+                return launch_app(app)
+
+            def done(res):
+                ui["busy"] = False
+                try:
+                    if isinstance(res, Exception):
+                        msg.config(text="Failed: " + str(res)[:150], fg=RED)
+                    else:
+                        state["app_procs"][app["name"]] = res
+                        ui["closed"] = False
+                    sync()
+                except tk.TclError:
+                    pass
+
+            bg(work, done)
+
+        def stop():
+            p = state["app_procs"].get(app["name"])
+            if p is not None and p.poll() is None:
+                ui["closed"] = True
+                p.terminate()
+
+        def tick():
+            p = state["app_procs"].get(app["name"])
+            if p is not None and p.poll() is not None:
+                rc = p.returncode
+                state["app_procs"].pop(app["name"], None)
+                if ui.get("closed"):
+                    ui["closed"] = False
+                    msg.config(text="")
+                elif rc not in (0, None):
+                    msg.config(text="App error: " + tail_of(APP_LOG_PATH), fg=RED)
+                else:
+                    msg.config(text="")
+            sync()
+            state["anim"] = root.after(400, tick)
+
+        main_btn.config(command=start)
+        close_btn.config(command=stop)
+        tick()
+
     home_btn.bind("<Button-1>", lambda e: show_home())
+    apps_btn.bind("<Button-1>", lambda e: open_apps())
 
     # ---------- Alt bilgi ----------
     footer = tk.Frame(root, bg=LIGHT, highlightbackground=LINE, highlightthickness=1)
