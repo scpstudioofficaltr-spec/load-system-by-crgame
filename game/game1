@@ -1,1 +1,379 @@
+import math
+import random
+import time
+import tkinter as tk
 
+TITLE = "VELTA"
+FOV_DEG = 75
+NEAR = 0.2
+OBJ_FOG = 130.0
+GRID_STEP = 5
+GRID_N = 12
+GRID_SEG = 4
+
+SKY_TOP = (6, 4, 28)
+SKY_HOR = (120, 22, 96)
+GROUND = (14, 6, 26)
+FOG_COL = (110, 24, 90)
+GRID_MAIN = (255, 45, 150)
+GRID_MAJOR = (45, 225, 255)
+PALETTE = [(255, 50, 110), (45, 225, 255), (165, 95, 255), (255, 190, 45)]
+
+_l = (0.45, 0.8, 0.4)
+_n = math.sqrt(sum(v * v for v in _l))
+LIGHT = tuple(v / _n for v in _l)
+
+
+def mix(a, b, t):
+    t = max(0.0, min(1.0, t))
+    return (a[0] + (b[0] - a[0]) * t,
+            a[1] + (b[1] - a[1]) * t,
+            a[2] + (b[2] - a[2]) * t)
+
+
+def hexc(c):
+    r, g, b = (max(0, min(255, int(v))) for v in c)
+    return "#%02x%02x%02x" % (r, g, b)
+
+
+# ---------- Şekiller ----------
+CUBE = [
+    [(-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1)],
+    [(-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1)],
+    [(-1, -1, -1), (-1, -1, 1), (-1, 1, 1), (-1, 1, -1)],
+    [(1, -1, -1), (1, -1, 1), (1, 1, 1), (1, 1, -1)],
+    [(-1, -1, -1), (1, -1, -1), (1, -1, 1), (-1, -1, 1)],
+    [(-1, 1, -1), (1, 1, -1), (1, 1, 1), (-1, 1, 1)],
+]
+_base = [(-1, -1, -1), (1, -1, -1), (1, -1, 1), (-1, -1, 1)]
+PYRAMID = [_base] + [[_base[i], _base[(i + 1) % 4], (0, 1, 0)] for i in range(4)]
+OCTA = [[(sx, 0, 0), (0, sy, 0), (0, 0, sz)]
+        for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)]
+SHAPES = {"cube": CUBE, "pyramid": PYRAMID, "octa": OCTA}
+
+
+def face_normal(poly, center):
+    a, b, c = poly[0], poly[1], poly[2]
+    ux, uy, uz = b[0] - a[0], b[1] - a[1], b[2] - a[2]
+    vx, vy, vz = c[0] - a[0], c[1] - a[1], c[2] - a[2]
+    n = (uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx)
+    k = len(poly)
+    fc = (sum(p[0] for p in poly) / k, sum(p[1] for p in poly) / k, sum(p[2] for p in poly) / k)
+    if n[0] * (fc[0] - center[0]) + n[1] * (fc[1] - center[1]) + n[2] * (fc[2] - center[2]) < 0:
+        n = (-n[0], -n[1], -n[2])
+    ln = math.sqrt(n[0] ** 2 + n[1] ** 2 + n[2] ** 2) or 1.0
+    return (n[0] / ln, n[1] / ln, n[2] / ln), fc
+
+
+class Game:
+    def __init__(self, parent):
+        self.win = tk.Toplevel(parent)
+        self.win.title(TITLE + " - 3D")
+        self.win.configure(bg="#0e0618")
+        try:
+            self.win.state("zoomed")
+        except tk.TclError:
+            self.win.geometry("1100x700")
+        self.c = tk.Canvas(self.win, bg="#0e0618", highlightthickness=0)
+        self.c.pack(fill="both", expand=True)
+
+        self.x, self.y, self.z = 0.0, 3.0, -12.0
+        self.yaw, self.pitch = 0.0, -0.05
+        self.keys = set()
+        self.t = 0.0
+        self.fps = 60.0
+        self.dead = False
+        self.last = time.perf_counter()
+        self.mouse = None
+
+        rnd = random.Random(7)
+        self.stars = []
+        for _ in range(90):
+            a = rnd.uniform(0, math.tau)
+            e = rnd.uniform(0.08, 1.4)
+            self.stars.append((math.cos(a) * math.cos(e) * 500, math.sin(e) * 500,
+                               math.sin(a) * math.cos(e) * 500, rnd.choice((1, 1, 2))))
+        self.objs = self.make_world(rnd)
+
+        w = self.win
+        w.bind("<KeyPress>", self.on_down)
+        w.bind("<KeyRelease>", self.on_up)
+        w.bind("<ButtonPress-1>", self.on_mouse_down)
+        w.bind("<B1-Motion>", self.on_mouse_move)
+        w.protocol("WM_DELETE_WINDOW", self.close)
+        w.focus_force()
+        self.loop()
+
+    # ---------- Dünya ----------
+    def make_world(self, rnd):
+        objs = []
+
+        def add(shape, pos, scale, color, spin=0.0, bob=0.0):
+            objs.append(dict(shape=shape, pos=pos, scale=scale, color=color,
+                             spin=spin, bob=bob, phase=rnd.uniform(0, 6.28)))
+
+        add("octa", (0, 6, 28), (3.5, 5, 3.5), (255, 50, 110), 0.8, 0.7)
+        for i in range(9):
+            z = 8 + i * 14
+            for side in (-1, 1):
+                h = rnd.uniform(3, 10)
+                add("cube", (side * 14, h, z), (1.5, h, 1.5), PALETTE[(i + (side > 0)) % 4])
+        for _ in range(12):
+            a = rnd.uniform(0, math.tau)
+            r = rnd.uniform(30, 75)
+            s = rnd.uniform(1.8, 3.5)
+            add("pyramid", (math.cos(a) * r, s, math.sin(a) * r + 25), (s, s, s),
+                rnd.choice(PALETTE), rnd.uniform(-0.5, 0.5))
+        for _ in range(16):
+            s = rnd.uniform(0.6, 1.5)
+            add("cube", (rnd.uniform(-35, 35), rnd.uniform(3, 10), rnd.uniform(0, 70)),
+                (s, s, s), rnd.choice(PALETTE), rnd.uniform(-1.2, 1.2), 0.5)
+        return objs
+
+    # ---------- Girdi ----------
+    def on_down(self, e):
+        k = e.keysym.lower()
+        if k == "escape":
+            self.close()
+            return
+        self.keys.add(k)
+
+    def on_up(self, e):
+        self.keys.discard(e.keysym.lower())
+
+    def on_mouse_down(self, e):
+        self.mouse = (e.x, e.y)
+
+    def on_mouse_move(self, e):
+        if self.mouse:
+            self.yaw += (e.x - self.mouse[0]) * 0.005
+            self.pitch -= (e.y - self.mouse[1]) * 0.005
+            self.pitch = max(-1.4, min(1.4, self.pitch))
+        self.mouse = (e.x, e.y)
+
+    def close(self):
+        self.dead = True
+        try:
+            self.win.destroy()
+        except tk.TclError:
+            pass
+
+    # ---------- Güncelleme ----------
+    def update(self, dt):
+        k = self.keys
+        speed = 9.0 * (2.2 if ("shift_l" in k or "shift_r" in k) else 1.0)
+        fx, fz = math.sin(self.yaw), math.cos(self.yaw)
+        rx, rz = math.cos(self.yaw), -math.sin(self.yaw)
+        if "w" in k:
+            self.x += fx * speed * dt
+            self.z += fz * speed * dt
+        if "s" in k:
+            self.x -= fx * speed * dt
+            self.z -= fz * speed * dt
+        if "d" in k:
+            self.x += rx * speed * dt
+            self.z += rz * speed * dt
+        if "a" in k:
+            self.x -= rx * speed * dt
+            self.z -= rz * speed * dt
+        if "e" in k or "space" in k:
+            self.y += speed * dt
+        if "q" in k:
+            self.y -= speed * dt
+        if "left" in k:
+            self.yaw -= 1.8 * dt
+        if "right" in k:
+            self.yaw += 1.8 * dt
+        if "up" in k:
+            self.pitch = min(1.4, self.pitch + 1.2 * dt)
+        if "down" in k:
+            self.pitch = max(-1.4, self.pitch - 1.2 * dt)
+        self.x = max(-95, min(95, self.x))
+        self.z = max(-95, min(120, self.z))
+        self.y = max(0.6, min(40, self.y))
+
+    # ---------- 3D yardımcıları ----------
+    def to_cam(self, p):
+        dx, dy, dz = p[0] - self.x, p[1] - self.y, p[2] - self.z
+        x1 = dx * self.cyw - dz * self.syw
+        z1 = dx * self.syw + dz * self.cyw
+        y2 = dy * self.cpt - z1 * self.spt
+        z2 = dy * self.spt + z1 * self.cpt
+        return (x1, y2, z2)
+
+    def proj(self, p):
+        sx = self.w / 2 + p[0] * self.f / p[2]
+        sy = self.h / 2 - p[1] * self.f / p[2]
+        return max(-20000, min(20000, sx)), max(-20000, min(20000, sy))
+
+    @staticmethod
+    def clip_poly(pts):
+        out = []
+        n = len(pts)
+        for i in range(n):
+            a, b = pts[i], pts[(i + 1) % n]
+            ina, inb = a[2] >= NEAR, b[2] >= NEAR
+            if ina:
+                out.append(a)
+            if ina != inb:
+                t = (NEAR - a[2]) / (b[2] - a[2])
+                out.append((a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, NEAR))
+        return out
+
+    def seg(self, a, b, color):
+        a, b = self.to_cam(a), self.to_cam(b)
+        if a[2] < NEAR and b[2] < NEAR:
+            return
+        if a[2] < NEAR:
+            t = (NEAR - a[2]) / (b[2] - a[2])
+            a = (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, NEAR)
+        elif b[2] < NEAR:
+            t = (NEAR - b[2]) / (a[2] - b[2])
+            b = (b[0] + (a[0] - b[0]) * t, b[1] + (a[1] - b[1]) * t, NEAR)
+        p, q = self.proj(a), self.proj(b)
+        self.c.create_line(p[0], p[1], q[0], q[1], fill=color)
+
+    # ---------- Çizim ----------
+    def render(self):
+        c = self.c
+        c.delete("all")
+        self.w = max(c.winfo_width(), 2)
+        self.h = max(c.winfo_height(), 2)
+        self.f = 0.5 * self.w / math.tan(math.radians(FOV_DEG) / 2)
+        self.cyw, self.syw = math.cos(self.yaw), math.sin(self.yaw)
+        self.cpt, self.spt = math.cos(self.pitch), math.sin(self.pitch)
+        horizon = self.h / 2 + self.f * math.tan(self.pitch)
+
+        self.draw_sky(horizon)
+        self.draw_grid()
+        self.draw_objects()
+        self.draw_hud()
+
+    def draw_sky(self, horizon):
+        c, w, h = self.c, self.w, self.h
+        if horizon > 0:
+            n = 22
+            bh = horizon / n
+            for i in range(n):
+                y0 = i * bh
+                if y0 > h:
+                    break
+                col = mix(SKY_TOP, SKY_HOR, (i / (n - 1)) ** 2)
+                c.create_rectangle(0, y0, w, min(y0 + bh + 1, h), fill=hexc(col), outline="")
+            for sx_, sy_, sz_, size in self.stars:
+                p = self.to_cam((self.x + sx_, self.y + sy_, self.z + sz_))
+                if p[2] > 0.01:
+                    px, py = self.proj(p)
+                    if 0 < px < w and 0 < py < min(horizon, h):
+                        c.create_rectangle(px, py, px + size, py + size, fill="#e8d8ff", outline="")
+            # güneş
+            p = self.to_cam((self.x, self.y + 64, self.z + 400))
+            if p[2] > 1:
+                px, py = self.proj(p)
+                r = self.f * 70 / p[2]
+                c.create_oval(px - r, py - r, px + r, py + r, fill="#ff6a3d", outline="")
+                r2 = r * 0.82
+                c.create_oval(px - r2, py - r2, px + r2, py + r2, fill="#ff3d8a", outline="")
+                r3 = r * 0.5
+                c.create_oval(px - r3, py - r3, px + r3, py + r3, fill="#ffb347", outline="")
+        if horizon < h:
+            c.create_rectangle(0, max(horizon, 0), w, h, fill=hexc(GROUND), outline="")
+            if horizon > 0:
+                c.create_line(0, horizon, w, horizon, fill="#ff3ca0", width=2)
+
+    def draw_grid(self):
+        step, n, seg = GRID_STEP, GRID_N, GRID_SEG
+        x0 = math.floor(self.x / step) * step
+        z0 = math.floor(self.z / step) * step
+        span = n * step
+        sl = 2 * span / seg
+        for i in range(-n, n + 1):
+            gx, gz = x0 + i * step, z0 + i * step
+            major_x = round(gx / step) % 4 == 0
+            major_z = round(gz / step) % 4 == 0
+            for s in range(seg):
+                a = -span + s * sl
+                # z yönündeki çizgi (sabit x)
+                za, zb = z0 + a, z0 + a + sl
+                d = math.hypot(gx - self.x, (za + zb) / 2 - self.z) / (span * 1.15)
+                if d < 1:
+                    col = mix(GRID_MAJOR if major_x else GRID_MAIN, GROUND, d ** 0.8)
+                    self.seg((gx, 0, za), (gx, 0, zb), hexc(col))
+                # x yönündeki çizgi (sabit z)
+                xa, xb = x0 + a, x0 + a + sl
+                d = math.hypot((xa + xb) / 2 - self.x, gz - self.z) / (span * 1.15)
+                if d < 1:
+                    col = mix(GRID_MAJOR if major_z else GRID_MAIN, GROUND, d ** 0.8)
+                    self.seg((xa, 0, gz), (xb, 0, gz), hexc(col))
+
+    def draw_objects(self):
+        polys = []
+        t = self.t
+        for o in self.objs:
+            ang = t * o["spin"] + o["phase"]
+            ca, sa = math.cos(ang), math.sin(ang)
+            px, py, pz = o["pos"]
+            py += math.sin(t * 1.4 + o["phase"]) * o["bob"]
+            if math.hypot(px - self.x, pz - self.z) > OBJ_FOG + 25:
+                continue
+            kx, ky, kz = o["scale"]
+            base = o["color"]
+            for face in SHAPES[o["shape"]]:
+                world = []
+                for vx, vy, vz in face:
+                    x, y, z = vx * kx, vy * ky, vz * kz
+                    world.append((x * ca + z * sa + px, y + py, -x * sa + z * ca + pz))
+                nrm, fc = face_normal(world, (px, py, pz))
+                view = (self.x - fc[0], self.y - fc[1], self.z - fc[2])
+                if nrm[0] * view[0] + nrm[1] * view[1] + nrm[2] * view[2] <= 0:
+                    continue
+                cam = [self.to_cam(p) for p in world]
+                depth = sum(p[2] for p in cam) / len(cam)
+                lum = 0.28 + 0.72 * max(0.0, nrm[0] * LIGHT[0] + nrm[1] * LIGHT[1] + nrm[2] * LIGHT[2])
+                dist = math.sqrt(view[0] ** 2 + view[1] ** 2 + view[2] ** 2)
+                ft = (dist / OBJ_FOG) ** 1.3
+                fill = mix((base[0] * lum, base[1] * lum, base[2] * lum), FOG_COL, ft)
+                edge = mix(mix(base, (255, 255, 255), 0.45), FOG_COL, ft)
+                polys.append((depth, cam, hexc(fill), hexc(edge)))
+        polys.sort(key=lambda p: -p[0])
+        for _, cam, fill, edge in polys:
+            pts = self.clip_poly(cam)
+            if len(pts) < 3:
+                continue
+            flat = []
+            for p in pts:
+                flat.extend(self.proj(p))
+            self.c.create_polygon(flat, fill=fill, outline=edge)
+
+    def draw_hud(self):
+        c, w, h = self.c, self.w, self.h
+        c.create_text(24, 22, text=TITLE, anchor="w", fill="#ff2a6e", font=("Consolas", 20, "bold"))
+        c.create_text(24, 46, text="3D DEMO SAHNESİ", anchor="w", fill="#c9a8ff", font=("Consolas", 10))
+        c.create_text(w - 20, 22, text="%d FPS" % self.fps, anchor="e", fill="#7dffb3", font=("Consolas", 11))
+        c.create_text(w - 20, 42, text="X %.0f  Y %.0f  Z %.0f" % (self.x, self.y, self.z),
+                      anchor="e", fill="#c9a8ff", font=("Consolas", 10))
+        c.create_text(w / 2, h - 22,
+                      text="WASD hareket  |  Oklar / fare sürükle: bak  |  E-Q yüksel-alçal  |  Shift hızlı  |  ESC çık",
+                      fill="#c9a8ff", font=("Consolas", 10))
+        c.create_line(w / 2 - 8, h / 2, w / 2 + 8, h / 2, fill="#ffffff")
+        c.create_line(w / 2, h / 2 - 8, w / 2, h / 2 + 8, fill="#ffffff")
+
+    # ---------- Döngü ----------
+    def loop(self):
+        if self.dead:
+            return
+        now = time.perf_counter()
+        dt = min(0.05, now - self.last)
+        self.last = now
+        self.t += dt
+        self.update(dt)
+        try:
+            self.render()
+        except tk.TclError:
+            return
+        self.fps = self.fps * 0.9 + (1.0 / max(dt, 1e-3)) * 0.1
+        self.win.after(10, self.loop)
+
+
+def play(root):
+    Game(root)
