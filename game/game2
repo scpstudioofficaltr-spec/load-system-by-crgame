@@ -10,6 +10,7 @@ NB = 9                      # blok sayısı (NB x NB)
 MW = MH = NB * BLK          # harita boyutu (karo)
 ROAD, SIDE, BLDG, PARK = 0, 1, 2, 3
 MAX_WANTED = 5
+POLICE_MULT = {"Kolay": 0.5, "Normal": 1.0, "Zor": 1.5}
 
 C_ROAD = "#2b2f38"
 C_ROAD_ALT = "#2f3440"
@@ -181,8 +182,13 @@ class Game:
         self.mission_reward = 0
         self.new_mission()
 
+        self.state = "menu"          # menu / playing / paused / settings
+        self.prev_state = "menu"
+        self.settings = {"fps": True, "minimap": True, "police": "Normal"}
+        self.buttons = []
+
         self.cv.bind("<Motion>", self.on_motion)
-        self.cv.bind("<ButtonPress-1>", lambda e: setattr(self, "firing", True))
+        self.cv.bind("<ButtonPress-1>", self.on_press)
         self.cv.bind("<ButtonRelease-1>", lambda e: setattr(self, "firing", False))
         w = self.win
         w.bind("<KeyPress>", self.on_down)
@@ -283,7 +289,14 @@ class Game:
     def on_down(self, e):
         k = e.keysym.lower()
         if k == "escape":
-            self.close()
+            if self.state == "playing":
+                self.set_state("paused")
+            elif self.state == "paused":
+                self.set_state("playing")
+            elif self.state == "settings":
+                self.set_state(self.prev_state)
+            return
+        if self.state != "playing":
             return
         if k not in self.keys and k == "e" and self.down_t <= 0:
             self.toggle_car()
@@ -596,7 +609,8 @@ class Game:
         self.heat = 0.0
 
     def spawn_stuff(self, dt):
-        target = min(6, self.wanted * 2)
+        mult = POLICE_MULT[self.settings["police"]]
+        target = min(6, int(round(self.wanted * 2 * mult)))
         cops = [c for c in self.cars if c["kind"] == "police"]
         self.police_t -= dt
         if len(cops) < target and self.police_t <= 0 and self.down_t <= 0:
@@ -653,6 +667,108 @@ class Game:
         self.cars = [c for c in self.cars if c["kind"] != "police"]
         self.bullets = []
         self.say("Hastanede uyandın")
+
+    # ----- menüler -----
+    def set_state(self, s):
+        self.state = s
+        self.keys.clear()
+        self.firing = False
+
+    def do_action(self, act):
+        if act in ("play", "resume"):
+            self.set_state("playing")
+        elif act == "settings":
+            self.prev_state = self.state
+            self.set_state("settings")
+        elif act == "back":
+            self.set_state(self.prev_state)
+        elif act == "menu":
+            self.set_state("menu")
+        elif act == "quit":
+            self.close()
+        elif act == "fps":
+            self.settings["fps"] = not self.settings["fps"]
+        elif act == "minimap":
+            self.settings["minimap"] = not self.settings["minimap"]
+        elif act == "police":
+            levels = list(POLICE_MULT.keys())
+            i = levels.index(self.settings["police"])
+            self.settings["police"] = levels[(i + 1) % len(levels)]
+
+    def on_press(self, e):
+        if self.state == "playing":
+            self.firing = True
+            return
+        for x0, y0, x1, y1, act in self.buttons:
+            if x0 <= e.x <= x1 and y0 <= e.y <= y1:
+                self.do_action(act)
+                return
+
+    def idle(self, dt):
+        """Menüdeyken şehir canlı kalsın diye sadece trafik ve kamera hareket eder."""
+        self.t += dt
+        k = min(1.0, dt * 9)
+        self.cam_x += (self.px - self.w / 2 - self.cam_x) * k
+        self.cam_y += (self.py - self.h / 2 - self.cam_y) * k
+        for c in self.cars:
+            if c["kind"] != "traffic":
+                continue
+            c["x"] += math.cos(c["a"]) * c["v"] * dt
+            c["y"] += math.sin(c["a"]) * c["v"] * dt
+            if c["x"] < -2 * TS:
+                c["x"] = (MW + 1) * TS
+            elif c["x"] > (MW + 2) * TS:
+                c["x"] = -TS
+            if c["y"] < -2 * TS:
+                c["y"] = (MH + 1) * TS
+            elif c["y"] > (MH + 2) * TS:
+                c["y"] = -TS
+        self.update_fx(dt)
+
+    def button(self, x, y, w, h, label, act):
+        cv = self.cv
+        hover = x <= self.mx <= x + w and y <= self.my <= y + h
+        cv.create_rectangle(x, y, x + w, y + h,
+                            fill=C_YELLOW if hover else "#1a1f2b",
+                            outline=C_YELLOW if hover else C_HUD_EDGE, width=2)
+        cv.create_text(x + w / 2, y + h / 2, text=label,
+                       fill="#101010" if hover else C_TEXT, font=("Segoe UI", 14, "bold"))
+        self.buttons.append((x, y, x + w, y + h, act))
+
+    def menu_box(self, title, sub, rows):
+        cv = self.cv
+        pw = 380
+        ph = 110 + len(rows) * 66 + 16
+        cx = self.w / 2
+        x0 = cx - pw / 2
+        y0 = self.h / 2 - ph / 2
+        self.panel(x0, y0, x0 + pw, y0 + ph)
+        cv.create_rectangle(x0, y0, x0 + pw, y0 + 5, fill=C_YELLOW, outline="")
+        cv.create_text(cx, y0 + 42, text=title, fill=C_TEXT, font=("Segoe UI", 26, "bold"))
+        if sub:
+            cv.create_text(cx, y0 + 74, text=sub, fill=C_MUTED, font=("Segoe UI", 10))
+        y = y0 + 100
+        for label, act in rows:
+            self.button(x0 + 30, y, pw - 60, 50, label, act)
+            y += 66
+
+    def draw_menus(self):
+        self.buttons = []
+        if self.state == "menu":
+            self.menu_box("SAN NOVA", "2D  •  ŞEHİR OYUNU",
+                          [("PLAY", "play"), ("SETTINGS", "settings"), ("QUIT", "quit")])
+        elif self.state == "paused":
+            self.menu_box("PAUSED", "ESC: devam et",
+                          [("RESUME", "resume"), ("SETTINGS", "settings"),
+                           ("MAIN MENU", "menu"), ("QUIT", "quit")])
+        elif self.state == "settings":
+            def onoff(b):
+                return "AÇIK" if b else "KAPALI"
+            self.menu_box("SETTINGS", "",
+                          [("FPS göster:  " + onoff(self.settings["fps"]), "fps"),
+                           ("Mini harita:  " + onoff(self.settings["minimap"]), "minimap"),
+                           ("Polis yoğunluğu:  " + self.settings["police"], "police"),
+                           ("BACK", "back")])
 
     # ----- çizim -----
     def render(self):
@@ -751,8 +867,11 @@ class Game:
             r = p["r"] * clamp(p["life"] / 0.8, 0.3, 1.0)
             cv.create_oval(sx - r, sy - r, sx + r, sy + r, fill=p["col"], outline="")
 
-        self.draw_mission()
-        self.draw_hud()
+        if self.state in ("playing", "paused"):
+            self.draw_mission()
+            self.draw_hud()
+        if self.state != "playing":
+            self.draw_menus()
 
     def draw_block(self, bx, by, info):
         cv = self.cv
@@ -916,10 +1035,13 @@ class Game:
         cv.create_text(28, h - 36, anchor="w", fill=C_MUTED, font=("Segoe UI", 10),
                        text="WASD hareket  •  Fare nişan  •  Sol tık / Boşluk ateş  •  "
                             "E araç  •  Shift koş  •  ESC çık")
-        cv.create_text(w - 14, h - 14, anchor="se", text="%d FPS" % self.fps,
-                       fill="#7dffb3", font=("Consolas", 9))
+        if self.settings["fps"]:
+            cv.create_text(w - 14, h - 14, anchor="se", text="%d FPS" % self.fps,
+                           fill="#7dffb3", font=("Consolas", 9))
 
-        # Mini harita
+        # Mini harita (ayarlardan kapatılabilir; bu bölüm HUD'un son kısmı)
+        if not self.settings["minimap"]:
+            return
         mx0, my0 = w - 200, h - 200
         self.panel(mx0 - 10, my0 - 10, mx0 + 190, my0 + 190)
         cv.create_image(mx0, my0, anchor="nw", image=self.mini)
@@ -938,7 +1060,10 @@ class Game:
         dt = min(0.05, now - self.last)
         self.last = now
         try:
-            self.update(dt)
+            if self.state == "playing":
+                self.update(dt)
+            elif self.state in ("menu", "settings"):
+                self.idle(dt)
             self.render()
         except tk.TclError:
             return                      # pencere kapandıysa çık
