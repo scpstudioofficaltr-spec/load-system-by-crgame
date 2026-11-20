@@ -7,6 +7,7 @@ import tempfile
 import threading
 import subprocess
 import urllib.request
+import urllib.parse
 import tkinter as tk
 
 WHITE = "#ffffff"
@@ -16,7 +17,10 @@ GREY = "#666666"
 LIGHT = "#f6f6f6"
 LINE = "#e5e5e5"
 
-BASE = "https://raw.githubusercontent.com/scpstudioofficaltr-spec/load-system-by-crgame/refs/heads/main/"
+# --- URL AYARLARI (DÜZELTİLDİ) ---
+# raw.githubusercontent.com "refs/heads" YOLUNU DESTEKLEMEZ.
+# Doğru format: https://raw.githubusercontent.com/USER/REPO/BRANCH/YOL
+BASE = "https://raw.githubusercontent.com/scpstudioofficaltr-spec/load-system-by-crgame/main/"
 LIST_URLS = [BASE + "game/list", BASE + "oyun/list"]
 APP_LIST_URLS = [BASE + "app/list"]
 APP_FILES_BASE = BASE + "app/"
@@ -31,11 +35,12 @@ APPS_DIR = os.path.join(TMP, "crgame_apps")
 FALLBACK = [{"name": "Örnek Oyun", "file": "ornek_oyun.py", "url": None,
              "desc": "Liste alınamadı. Bu bir örnek oyundur."}]
 
+# DÜZELTİLDİ: raw URL doğru formatta
 APP_FALLBACK = [{"name": "app-load-system", "file": "app-load-system.pyw",
-                 "slug": "app-load-system", "url": APP_FILES_BASE + "app-load-system",
+                 "slug": "app-load-system",
+                 "url": BASE + "app/app-load-system",
                  "desc": "Load System uygulaması."}]
 
-# Oyunu ayrı bir uygulama (ayrı süreç) olarak açan küçük program
 RUNNER = r'''
 import sys, ctypes
 import tkinter as tk
@@ -83,15 +88,20 @@ main()
 
 
 def fetch_bytes(url, timeout=15):
-    if "raw.githubusercontent.com" in url:          # önbelleği atlat
-        url += ("&" if "?" in url else "?") + "t=" + str(int(time.time()))
+    """URL'den bayt indirir. raw.githubusercontent.com için cache-busting ekler."""
+    if not url:
+        raise ValueError("URL boş")
+    if "raw.githubusercontent.com" in url:
+        # DÜZELTİLDİ: zaten query varsa & ile, yoksa ? ile ekle
+        sep = "&" if "?" in url else "?"
+        url = url + sep + "t=" + str(int(time.time()))
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read()
 
 
 def parse_line(line):
-    """isim | açıklama | raw url   (açıklama ve url isteğe bağlı)"""
+    """isim | açıklama | raw url"""
     parts = [p.strip() for p in line.split("|")]
     url = None
     if len(parts) > 1 and parts[-1].lower().startswith("http"):
@@ -105,8 +115,7 @@ def parse_line(line):
 
 
 def parse_app_line(line):
-    """isim | açıklama | raw url   (açıklama ve url isteğe bağlı).
-    Url yoksa app/ klasöründeki aynı isimli dosya kullanılır."""
+    """isim | açıklama | raw url (url yoksa app/ klasöründen aynı isimle çekilir)"""
     parts = [p.strip() for p in line.split("|")]
     url = None
     if len(parts) > 1 and parts[-1].lower().startswith("http"):
@@ -119,7 +128,9 @@ def parse_app_line(line):
             break
     slug = re.sub(r"[^A-Za-z0-9_-]", "_", name) or "app"
     if not url:
-        url = APP_FILES_BASE + raw.replace(" ", "%20")
+        # DÜZELTİLDİ: dosya adını URL-encode et
+        safe = urllib.parse.quote(raw.replace(" ", "_"))
+        url = APP_FILES_BASE + safe
     desc = parts[1] if len(parts) > 1 and parts[1] else "Bu uygulama için henüz açıklama eklenmedi."
     return {"name": name, "file": slug + ".pyw", "slug": slug, "url": url, "desc": desc}
 
@@ -157,7 +168,6 @@ def fetch_apps():
 
 
 def find_icon():
-    """Loader'ın indirdiği ikonu bulur (aynı ikon oyunda da kullanılır)."""
     ico = os.path.join(TMP, "crgame_app_icon.ico")
     png = os.path.join(TMP, "crgame_app_icon.png")
     if os.path.exists(ico):
@@ -168,7 +178,6 @@ def find_icon():
 
 
 def start_process(game, code):
-    """Oyun kodunu diske yazar ve ayrı bir uygulama olarak başlatır."""
     if getattr(sys, "frozen", False):
         raise RuntimeError("Ayrı uygulama olarak açmak için programı Python ile çalıştır (exe olmaz).")
     slug = re.sub(r"[^a-z0-9]", "", game["file"].lower().replace(".py", "")) or "game"
@@ -192,7 +201,6 @@ def app_path(app):
 
 
 def install_app(app):
-    """Uygulamayı indirir ve .pyw olarak diske kaydeder."""
     data = fetch_bytes(app["url"], 30)
     if not data.strip():
         raise ValueError("indirilen dosya boş")
@@ -202,7 +210,6 @@ def install_app(app):
 
 
 def launch_app(app):
-    """Kaydedilmiş .pyw dosyasını pythonw ile (konsolsuz) çalıştırır."""
     if getattr(sys, "frozen", False):
         raise RuntimeError("Uygulamayı açmak için programı Python ile çalıştır (exe olmaz).")
     exe = sys.executable
@@ -245,7 +252,6 @@ def build(root):
         p = state["proc"]
         return p is not None and p.poll() is None
 
-    # ---------- Arka plan işleri ----------
     def poll():
         if state["dead"]:
             return
@@ -271,7 +277,7 @@ def build(root):
             q.put((cb, res))
         threading.Thread(target=work, daemon=True).start()
 
-    # ---------- Üst menü ----------
+    # Üst menü
     nav = tk.Frame(root, bg=WHITE, highlightbackground=LINE, highlightthickness=1)
     nav.pack(fill="x", side="top")
     tk.Label(nav, text="LOAD SYSTEM", fg=RED, bg=WHITE,
@@ -304,7 +310,6 @@ def build(root):
         root._crgame_note = ""
         note(pending)
 
-    # ---------- Kaydırılabilir gövde ----------
     body = tk.Frame(root, bg=WHITE)
     body.pack(fill="both", expand=True)
     canvas = tk.Canvas(body, bg=WHITE, highlightthickness=0)
@@ -328,7 +333,6 @@ def build(root):
             w.destroy()
         canvas.yview_moveto(0)
 
-    # ---------- UPDATE ----------
     def do_update():
         if proc_alive():
             note("Close the game first.")
@@ -356,18 +360,17 @@ def build(root):
             state["dead"] = True
             if isinstance(res, Exception):
                 root._crgame_note = "Update failed: " + str(res)[:70]
-                build(root)                    # eski arayüze geri dön
+                build(root)
                 return
             root._crgame_note = "Updated ✓"
             try:
-                res["build"](root)             # yeni kodla arayüzü yeniden kur
+                res["build"](root)
             except Exception as e:
                 root._crgame_note = "Update failed: " + str(e)[:70]
                 build(root)
 
         bg(work, done)
 
-    # ---------- ANA MENÜ ----------
     def show_home():
         clear()
         hero = tk.Frame(page, bg=WHITE)
@@ -414,7 +417,6 @@ def build(root):
         else:
             bg(fetch_games, lambda res: fill(FALLBACK if isinstance(res, Exception) else res))
 
-    # ---------- YÜKLEME ANİMASYONU ----------
     def show_spinner(text, after_done, frames=60):
         clear()
         box = tk.Frame(page, bg=WHITE)
@@ -441,7 +443,6 @@ def build(root):
     def show_loading(game):
         show_spinner(f"{game['name']} yükleniyor...", lambda: show_game(game))
 
-    # ---------- OYUN SAYFASI ----------
     def show_game(game):
         clear()
         box = tk.Frame(page, bg=WHITE)
@@ -544,7 +545,6 @@ def build(root):
         close_btn.config(command=stop)
         tick()
 
-    # ---------- APPS: yükleme animasyonu -> uygulama listesi ----------
     def open_apps():
         show_spinner("Apps yükleniyor...", show_apps, frames=45)
 
@@ -594,7 +594,6 @@ def build(root):
         else:
             bg(fetch_apps, lambda res: fill(APP_FALLBACK if isinstance(res, Exception) else res))
 
-    # ---------- APP SAYFASI (Install -> Loading... -> çalışır) ----------
     def show_app(app):
         clear()
         box = tk.Frame(page, bg=WHITE)
@@ -653,7 +652,7 @@ def build(root):
             def work():
                 if not os.path.exists(app_path(app)):
                     install_app(app)
-                time.sleep(0.8)                 # "Loading..." görünsün
+                time.sleep(0.8)
                 return launch_app(app)
 
             def done(res):
@@ -698,7 +697,6 @@ def build(root):
     home_btn.bind("<Button-1>", lambda e: show_home())
     apps_btn.bind("<Button-1>", lambda e: open_apps())
 
-    # ---------- Alt bilgi ----------
     footer = tk.Frame(root, bg=LIGHT, highlightbackground=LINE, highlightthickness=1)
     footer.pack(fill="x", side="bottom")
     tk.Label(footer, text="© LOAD SYSTEM", fg=GREY, bg=LIGHT,
@@ -706,3 +704,10 @@ def build(root):
 
     poll()
     show_home()
+
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    root.geometry("1000x700")
+    build(root)
+    root.mainloop()
